@@ -289,7 +289,11 @@ class SHAPEngine:
                 os.path.join(output_dir, "shap_complete.parquet"), index=False
             )
         if all_topk:
-            pd.concat(all_topk, ignore_index=True).to_parquet(
+            df_topk = pd.concat(all_topk, ignore_index=True)
+            # feature_value est mixed (float pour numériques, str pour catégorielles)
+            # → cast en str pour que pyarrow puisse sérialiser sans erreur
+            df_topk['feature_value'] = df_topk['feature_value'].astype(str)
+            df_topk.to_parquet(
                 os.path.join(output_dir, "shap_topk.parquet"), index=False
             )
 
