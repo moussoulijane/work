@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environnements
+.env
+.venv
+venv/
+env/
+
+# Data (trop lourd pour git)
+data/raw/
+data/processed/
+
+# Modèles entraînés
+models/lstm_scaler.pkl
+models/lstm_encoder.pt
+models/*.cbm
+models/optuna/
+
+# Outputs
+outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
