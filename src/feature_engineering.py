@@ -6,10 +6,9 @@ Feature engineering :
 import pandas as pd
 import numpy as np
 import logging
+from src.jour_utils import get_jour_cols, to_float_array
 
 logger = logging.getLogger(__name__)
-
-JOUR_COLS = [f'jour_{i}' for i in range(1, 92)]
 
 
 def add_balance_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -26,7 +25,7 @@ def add_balance_features(df: pd.DataFrame) -> pd.DataFrame:
     - solde_tendance        : coefficient directeur d'une régression linéaire
     """
     df = df.copy()
-    jour_present = [c for c in JOUR_COLS if c in df.columns]
+    jour_present = get_jour_cols(df)
 
     if not jour_present:
         logger.warning("Aucune colonne jour_* trouvée — features solde mises à 0")
@@ -36,7 +35,7 @@ def add_balance_features(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = 0.0
         return df
 
-    balances = df[jour_present].values.astype(np.float32)  # (n, 91)
+    balances = to_float_array(df, jour_present)  # (n, N) float32, virgule FR gérée
 
     df['solde_moyen']       = balances.mean(axis=1)
     df['solde_min']         = balances.min(axis=1)
@@ -86,7 +85,7 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # ── solde_acceleration : accélération de la tendance de solde ──
-    jour_present = [c for c in JOUR_COLS if c in df.columns]
+    jour_present = get_jour_cols(df)
     if jour_present and len(jour_present) > 2:
         balances = df[jour_present].values.astype(np.float32)  # (n, 91)
         diffs    = np.diff(balances, axis=1)                    # (n, 90)

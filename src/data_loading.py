@@ -4,10 +4,9 @@ Chargement et fusion des CSV sources.
 import os
 import pandas as pd
 import logging
+from src.jour_utils import get_jour_cols
 
 logger = logging.getLogger(__name__)
-
-JOUR_COLS = [f'jour_{i}' for i in range(1, 92)]
 
 
 def _parse_french_float(series: pd.Series) -> pd.Series:
@@ -40,8 +39,8 @@ def load_base(files: list[str], sep: str = ";") -> pd.DataFrame:
     df = pd.concat(dfs, ignore_index=True)
     logger.info(f"Base concaténée : {len(df):,} lignes")
 
-    # Convertir jour_* en float
-    jour_present = [c for c in JOUR_COLS if c in df.columns]
+    # Convertir jour_* en float (supporte jour_1..91 ET jour_DD/MM/YYYY)
+    jour_present = get_jour_cols(df)
     for col in jour_present:
         df[col] = _parse_french_float(df[col])
 
