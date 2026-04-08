@@ -36,6 +36,8 @@ class SequenceBuilder:
 
         self.scaler = StandardScaler()
         normalized = self.scaler.fit_transform(raw)
+        # Colonnes à variance nulle (tous zéros) → std=0 → StandardScaler produit NaN
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
 
         os.makedirs(os.path.dirname(self.scaler_path) or ".", exist_ok=True)
         joblib.dump(self.scaler, self.scaler_path)
@@ -63,6 +65,7 @@ class SequenceBuilder:
 
         self.scaler = joblib.load(self.scaler_path)
         normalized = self.scaler.transform(raw)
+        normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
 
         sequences = torch.FloatTensor(normalized).unsqueeze(-1)
         ids = df['id_client'].values

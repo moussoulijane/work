@@ -299,7 +299,8 @@ class LSTMTrainer:
                     val_preds.extend(torch.sigmoid(logits).cpu().numpy())
                     val_true.extend(by.cpu().numpy())
             val_loss /= len(val_loader.dataset)
-            val_auc   = roc_auc_score(np.array(val_true), np.array(val_preds))
+            preds_arr = np.nan_to_num(np.array(val_preds), nan=0.5)
+            val_auc   = roc_auc_score(np.array(val_true), preds_arr)
             current_lr = optimizer.param_groups[0]['lr']
 
             scheduler.step(val_auc)
