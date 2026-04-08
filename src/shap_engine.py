@@ -18,6 +18,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import logging
 
+from src.catboost_trainer import _prepare_X
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,15 +52,11 @@ class SHAPEngine:
             base_value  : float — valeur de base (biais SHAP)
             feature_names : list[str] — colonnes dans le même ordre que X
         """
-        available   = [f for f in self.feature_cols if f in X.columns]
-        X_clean     = X[available].copy()
-
-        for c in self.cat_features:
-            if c in X_clean.columns:
-                X_clean[c] = X_clean[c].fillna('INCONNU').astype(str)
-
-        cat_idx = [available.index(c) for c in self.cat_features if c in available]
-        pool    = Pool(X_clean, cat_features=cat_idx)
+        # _prepare_X élimine le ValueError "could not convert string to float"
+        X_clean  = _prepare_X(X, self.feature_cols, self.cat_features)
+        available = X_clean.columns.tolist()
+        cat_idx   = [available.index(c) for c in self.cat_features if c in available]
+        pool      = Pool(X_clean, cat_features=cat_idx)
 
         raw_shap   = model.get_feature_importance(data=pool, type='ShapValues')
         # raw_shap shape : (n, n_features + 1) — dernière col = biais
@@ -269,9 +267,9 @@ class SHAPEngine:
             all_complete.append(df_complete)
 
             # 5. Top K
-            X_clean   = df_seg[[f for f in self.feature_cols if f in df_seg.columns]].copy()
-            preds     = model.predict(X_clean)
-            probas    = model.predict_proba(X_clean)[:, 1]
+            X_clean = _prepare_X(df_seg, self.feature_cols, self.cat_features)
+            preds   = model.predict(X_clean)
+            probas  = model.predict_proba(X_clean)[:, 1]
             df_topk   = self.build_topk(
                 df_seg, shap_reduced, names_reduced, segment, preds, probas
             )

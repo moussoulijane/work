@@ -93,6 +93,111 @@ class LSTMEncoder(nn.Module):
         return logits, emb
 
 
+class LSTMEncoderWithAttention(nn.Module):
+    """
+    LSTM Encoder avec mécanisme d'attention temporelle.
+
+    Plutôt que d'utiliser uniquement le dernier hidden state, l'attention
+    apprend un poids par timestep (jour) et calcule un contexte pondéré.
+    Le modèle apprend ainsi QUELS jours sont importants pour la prédiction
+    (ex : pic de solde avant souscription, passage en négatif).
+
+    Architecture :
+        Input (batch, 91, 1)
+        → LSTM multicouche → outputs (batch, 91, hidden)
+        → Attention Linear(hidden, 1) → softmax → poids (batch, 91)
+        → Contexte pondéré (batch, hidden)
+        → Projection → ReLU → BatchNorm → embedding (batch, embedding_dim)
+        → Classifier head (entraînement)
+
+    Interface identique à LSTMEncoder (encode / forward).
+    """
+
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2,
+                 dropout=0.2, bidirectional=False, embedding_dim=32):
+        super().__init__()
+        self.bidirectional  = bidirectional
+        self.num_directions = 2 if bidirectional else 1
+        self.hidden_size    = hidden_size
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=True,
+        )
+
+        lstm_out = hidden_size * self.num_directions
+        # Couche d'attention : score scalaire par timestep
+        self.attention = nn.Linear(lstm_out, 1)
+
+        self.projection = nn.Sequential(
+            nn.Linear(lstm_out, embedding_dim),
+            nn.ReLU(),
+            nn.BatchNorm1d(embedding_dim),
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(embedding_dim, 1),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, param in self.lstm.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                param.data.fill_(0)
+                n = param.size(0)
+                param.data[n // 4: n // 2].fill_(1.0)
+        nn.init.xavier_uniform_(self.attention.weight)
+        self.attention.bias.data.fill_(0)
+
+    def encode(self, x):
+        """Encode avec attention. Compatible avec LSTMTrainer.extract_embeddings()."""
+        lstm_out, _ = self.lstm(x)                          # (batch, 91, hidden)
+        attn_scores  = self.attention(lstm_out).squeeze(-1) # (batch, 91)
+        attn_weights = torch.softmax(attn_scores, dim=1)    # (batch, 91)
+        # Contexte pondéré : somme pondérée des hidden states
+        context = (lstm_out * attn_weights.unsqueeze(-1)).sum(dim=1)  # (batch, hidden)
+        return self.projection(context)
+
+    def forward(self, x):
+        emb    = self.encode(x)
+        logits = self.classifier(emb).squeeze(-1)
+        return logits, emb
+
+    def get_attention_weights(self, x):
+        """
+        Retourne les poids d'attention pour interprétabilité.
+        Permet de visualiser quels jours influencent la décision.
+        Returns: np.ndarray (batch, 91)
+        """
+        self.eval()
+        with torch.no_grad():
+            lstm_out, _  = self.lstm(x)
+            attn_scores  = self.attention(lstm_out).squeeze(-1)
+            attn_weights = torch.softmax(attn_scores, dim=1)
+        return attn_weights.cpu().numpy()
+
+
+def build_lstm_encoder(config: dict):
+    """
+    Factory : retourne LSTMEncoderWithAttention si config['use_attention']=True,
+    sinon LSTMEncoder standard.
+    """
+    kwargs = {k: config[k] for k in
+              ['input_size', 'hidden_size', 'num_layers',
+               'dropout', 'bidirectional', 'embedding_dim']}
+    if config.get('use_attention', False):
+        return LSTMEncoderWithAttention(**kwargs)
+    return LSTMEncoder(**kwargs)
+
+
 class LSTMTrainer:
 
     def __init__(self, config: dict, save_dir: str = "models"):
@@ -145,15 +250,8 @@ class LSTMTrainer:
         train_loader = DataLoader(train_ds, batch_size=cfg['batch_size'], sampler=sampler)
         val_loader   = DataLoader(val_ds,   batch_size=cfg['batch_size'], shuffle=False)
 
-        # ── Modèle ──
-        model = LSTMEncoder(
-            input_size    = cfg['input_size'],
-            hidden_size   = cfg['hidden_size'],
-            num_layers    = cfg['num_layers'],
-            dropout       = cfg['dropout'],
-            bidirectional = cfg['bidirectional'],
-            embedding_dim = cfg['embedding_dim'],
-        ).to(self.device)
+        # ── Modèle (attention ou standard selon config) ──
+        model = build_lstm_encoder(cfg).to(self.device)
 
         # ── Loss + Optimizer + Scheduler ──
         pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32).to(self.device)

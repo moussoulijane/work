@@ -1,9 +1,12 @@
 """
 Optimisation du seuil de décision.
 
-4 stratégies : f1, f2, profit, youden.
-Pour l'appétence crédit : recommander F2 (favorise le rappel).
-Le seuil optimal sera typiquement ~0.25-0.45 (pas 0.5).
+Stratégies classiques : f1, f2, profit, youden.
+Stratégie précision-cible : precision_target (recommandée pour campagnes ciblées).
+
+Pour l'appétence crédit :
+  - Campagne large   → f2  (rappel prioritaire, seuil ~0.25-0.40)
+  - Campagne ciblée  → precision_target(min_precision=0.10-0.15)
 """
 import numpy as np
 import pandas as pd
@@ -11,6 +14,8 @@ from sklearn.metrics import fbeta_score
 import logging
 
 logger = logging.getLogger(__name__)
+
+_STRATEGIES = ('f1', 'f2', 'profit', 'youden', 'precision_target')
 
 
 def optimize_threshold(
@@ -20,28 +25,30 @@ def optimize_threshold(
     gain_tp: float = 4800,
     cost_fp: float = 50,
     cost_fn: float = 2400,
+    min_precision: float = 0.10,   # utilisé uniquement pour strategy='precision_target'
 ) -> tuple[float, dict, pd.DataFrame]:
     """
     Trouve le seuil optimal selon la stratégie choisie.
 
     Args:
-        y_true    : array 0/1
-        y_proba   : array de probas [0, 1]
-        strategy  : 'f1', 'f2', 'profit', 'youden'
-        gain_tp   : gain par vrai positif (MAD) — marge crédit conso
-        cost_fp   : coût par faux positif (MAD) — temps chargé CC
-        cost_fn   : coût par faux négatif (MAD) — manque à gagner
+        y_true         : array 0/1
+        y_proba        : array de probas [0, 1]
+        strategy       : 'f1' | 'f2' | 'profit' | 'youden' | 'precision_target'
+        gain_tp        : gain par vrai positif (MAD)
+        cost_fp        : coût par faux positif (MAD)
+        cost_fn        : coût par faux négatif (MAD)
+        min_precision  : précision minimale cible (strategy='precision_target' seulement)
 
     Returns:
         optimal_threshold : float
         metrics_at_opt    : dict des métriques au seuil optimal
         df_all            : DataFrame de toutes les métriques par seuil
     """
-    if strategy not in ('f1', 'f2', 'profit', 'youden'):
-        raise ValueError(f"strategy doit être parmi f1/f2/profit/youden, reçu : {strategy}")
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"strategy doit être parmi {_STRATEGIES}, reçu : {strategy}")
 
     thresholds = np.linspace(0.01, 0.99, 1000)
-    y_true = np.asarray(y_true)
+    y_true  = np.asarray(y_true)
     y_proba = np.asarray(y_proba)
     records = []
 
@@ -62,36 +69,52 @@ def optimize_threshold(
         youden      = recall + specificity - 1.0
 
         records.append({
-            'threshold':  float(t),
-            'precision':  precision,
-            'recall':     recall,
-            'f1':         f1,
-            'f2':         f2,
-            'profit':     float(profit),
-            'youden':     youden,
+            'threshold':             float(t),
+            'precision':             precision,
+            'recall':                recall,
+            'f1':                    f1,
+            'f2':                    f2,
+            'profit':                float(profit),
+            'youden':                youden,
             'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
-            'n_predicted_positive': tp + fp,
+            'n_predicted_positive':  tp + fp,
         })
 
     df = pd.DataFrame(records)
-    best_idx = int(df[strategy].idxmax())
-    optimal_row = df.iloc[best_idx]
+
+    if strategy == 'precision_target':
+        # Seuil le plus bas qui garantit precision >= min_precision
+        # → maximise le recall sous contrainte de précision
+        eligible = df[df['precision'] >= min_precision]
+        if eligible.empty:
+            logger.warning(
+                f"Aucun seuil n'atteint precision >= {min_precision:.2f} — "
+                "retour au seuil F2"
+            )
+            best_idx = int(df['f2'].idxmax())
+        else:
+            best_idx = int(eligible['recall'].idxmax())
+    else:
+        best_idx = int(df[strategy].idxmax())
+
+    optimal_row       = df.iloc[best_idx]
     optimal_threshold = float(optimal_row['threshold'])
 
-    # Affichage comparatif
+    # ── Affichage ──
     print(f"\n  Seuil optimal ({strategy}) : {optimal_threshold:.3f}")
+    if strategy == 'precision_target':
+        print(f"  Contrainte précision ≥ {min_precision:.2%}")
     print(f"\n  {'Seuil':>8} {'Précision':>10} {'Rappel':>8} "
           f"{'F1':>6} {'F2':>6} {'Profit':>10} {'N prédit+':>10}")
     print(f"  {'─'*8} {'─'*10} {'─'*8} {'─'*6} {'─'*6} {'─'*10} {'─'*10}")
 
-    key_thresholds = [0.3, 0.4, 0.5, optimal_threshold, 0.7]
     shown = set()
-    for t in key_thresholds:
-        t_rounded = round(t, 3)
-        if t_rounded in shown:
+    for t in [0.3, 0.4, 0.5, optimal_threshold, 0.7]:
+        t_r = round(t, 3)
+        if t_r in shown:
             continue
-        shown.add(t_rounded)
-        row = df.iloc[(df['threshold'] - t).abs().idxmin()]
+        shown.add(t_r)
+        row    = df.iloc[(df['threshold'] - t).abs().idxmin()]
         marker = " ← optimal" if abs(row['threshold'] - optimal_threshold) < 0.002 else ""
         print(f"  {row['threshold']:8.3f} {row['precision']:10.4f} {row['recall']:8.4f} "
               f"{row['f1']:6.4f} {row['f2']:6.4f} {row['profit']:10.0f} "

@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from catboost import CatBoostClassifier
 from sklearn.model_selection import train_test_split
-from src.catboost_trainer import CatBoostTrainer
+from src.catboost_trainer import CatBoostTrainer, _prepare_X
 from src.threshold_optimizer import optimize_threshold
 from src.error_analysis import ErrorAnalyzer
 from config import FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold
@@ -32,12 +32,9 @@ if __name__ == "__main__":
     for name, df_seg in [("LOW", df_low), ("HIGH", df_high)]:
         print(f"\n{'═'*55}\n  Segment {name}\n{'═'*55}")
 
-        available = [f for f in FEATURE_COLS if f in df_seg.columns]
-        X = df_seg[available].copy()
-        y = df_seg['target'].copy()
-        for c in CAT_FEATURES:
-            if c in X.columns:
-                X[c] = X[c].fillna('INCONNU').astype(str)
+        # _prepare_X → élimine ValueError "could not convert string to float"
+        X = _prepare_X(df_seg, FEATURE_COLS, CAT_FEATURES)
+        y = df_seg['target'].reset_index(drop=True)
 
         X_tr, X_te, y_tr, y_te = train_test_split(
             X, y, test_size=0.3, stratify=y, random_state=42
@@ -49,13 +46,23 @@ if __name__ == "__main__":
         y_proba = model.predict_proba(X_te)[:, 1]
         y_true  = y_te.values
 
+        # Calibration si disponible
+        cal_path = f"models/calibrator_{name.lower()}.pkl"
+        if os.path.exists(cal_path):
+            from src.calibration import ProbabilityCalibrator
+            cal     = ProbabilityCalibrator.load(cal_path)
+            y_proba = cal.transform(y_proba)
+
         threshold = args.threshold
         if threshold is None:
             threshold, _, _ = optimize_threshold(y_true, y_proba, strategy='f2')
             print(f"  Seuil F2 optimal : {threshold:.3f}")
 
-        # Reconstruire df_te avec features originales
-        df_te = df_seg.iloc[y_te.index].copy() if hasattr(y_te, 'index') else df_seg.head(len(y_te)).copy()
+        # Reconstruire df_te avec id_client si disponible
+        df_te = X_te.copy()
+        df_te['target'] = y_true
+        if 'id_client' in df_seg.columns:
+            df_te['id_client'] = df_seg.iloc[y_te.index]['id_client'].values
 
         analyzer.analyze(
             df_te, y_true, y_proba,

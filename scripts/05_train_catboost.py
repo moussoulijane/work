@@ -19,7 +19,7 @@ if __name__ == "__main__":
     print(f"Positifs : {int(df['target'].sum()):,} / {len(df):,}")
 
     trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
-    model_low, model_high, res_low, res_high = trainer.train(df, save_dir="models")
+    model_low, model_high, res_low, res_high = trainer.train(df, save_dir="models", calibrate=True)
 
     # Métriques
     evaluator = ModelEvaluator("outputs/metrics")

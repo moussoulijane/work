@@ -11,6 +11,10 @@ COMMON_FILES = {
 
 revenu_treshold = 7000
 
+# ── Segmentation 3 niveaux (amélioration précision LOW) ──
+REVENUE_THRESHOLDS = [4000, 7000]   # VERYLOW ≤4000 / MID 4000-7000 / HIGH >7000
+SEGMENT_NAMES_3   = ['VERYLOW', 'MID', 'HIGH']
+
 STATIC_FEATURE_COLS = [
     'count_simul', 'count_simul_mois_n_1', 'age',
     'mensualite_immo', 'total_mensualite_actif', 'duree_restante_ponderee',
@@ -22,6 +26,16 @@ BALANCE_STAT_COLS = [
     'solde_moyen', 'solde_min', 'solde_max', 'solde_std',
     'solde_volatilite', 'solde_nb_negatif', 'solde_dernier_jour',
     'solde_variation_moy', 'solde_tendance',
+]
+
+# ── 6 nouvelles features avancées ──
+ADVANCED_FEATURE_COLS = [
+    'simul_par_kMAD',       # intention × capacité financière
+    'marge_mensuelle',      # revenu - mensualités (MAD)
+    'capacite_credit_supp', # marge théorique règle 33%
+    'ratio_simul_recents',  # proportion simulations récentes
+    'score_fragilite',      # nb_négatif × volatilité
+    'solde_acceleration',   # accélération du solde (2ème dérivée)
 ]
 
 CAT_FEATURES = ['type_revenu', 'segment']
@@ -38,10 +52,12 @@ LSTM_CONFIG = {
     'learning_rate': 0.001,
     'epochs':        50,
     'patience':      10,
+    'use_attention': False,  # True → LSTMEncoderWithAttention
 }
 
 LSTM_EMBEDDING_COLS = [f'lstm_emb_{i}' for i in range(32)]
-FEATURE_COLS = STATIC_FEATURE_COLS + BALANCE_STAT_COLS + LSTM_EMBEDDING_COLS  # 52 features
+# 11 statiques + 9 stats + 6 avancées + 32 LSTM = 58 features
+FEATURE_COLS = STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS + LSTM_EMBEDDING_COLS
 
 MODEL_PARAMS = {
     'iterations':           1000,
@@ -83,5 +99,12 @@ FEATURE_LABELS = {
     'solde_dernier_jour':          'Solde dernier jour',
     'solde_variation_moy':         'Variation journalière moyenne',
     'solde_tendance':              'Tendance du solde',
+    # Features avancées
+    'simul_par_kMAD':              'Simulations / k MAD revenu',
+    'marge_mensuelle':             'Marge mensuelle (revenu - mensualités)',
+    'capacite_credit_supp':        'Capacité crédit supplémentaire (règle 33%)',
+    'ratio_simul_recents':         'Ratio simulations récentes',
+    'score_fragilite':             'Score de fragilité financière',
+    'solde_acceleration':          'Accélération du solde',
     'lstm_embedding':              'Profil temporel du compte (LSTM)',
 }

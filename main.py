@@ -30,12 +30,14 @@ from config import (
 )
 from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
-from src.feature_engineering import add_balance_features
+from src.feature_engineering import add_balance_features, add_advanced_features
 from src.sequence_builder import SequenceBuilder
-from src.lstm_model import LSTMEncoder, LSTMTrainer
+from src.lstm_model import build_lstm_encoder, LSTMEncoder, LSTMTrainer
 from src.feature_merger import FeatureMerger
 from src.catboost_trainer import CatBoostTrainer
+from src.calibration import ProbabilityCalibrator
 from src.metrics import ModelEvaluator
+from src.threshold_optimizer import optimize_threshold
 from src.shap_engine import SHAPEngine
 from src.error_analysis import ErrorAnalyzer
 
@@ -70,6 +72,7 @@ def build_base(files: list[str], cache_path: str, force_rebuild: bool) -> pd.Dat
     df = merge_common(df)
     df = preprocess(df)
     df = add_balance_features(df)
+    df = add_advanced_features(df)   # 6 features avancées
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     df.to_parquet(cache_path, index=False)
     print(f"  Base sauvegardée → {cache_path}")
@@ -99,8 +102,9 @@ def run_train(args):
     id_to_target = df.set_index('id_client')['target'].to_dict()
     targets      = np.array([id_to_target[i] for i in seq_ids])
 
-    # 7. LSTM train
-    print("\n  ── LSTM : Entraînement ──")
+    # 7. LSTM train (LSTMEncoderWithAttention si use_attention=True dans config)
+    print("\n  ── LSTM : Entraînement"
+          + (" (avec attention)" if LSTM_CONFIG.get('use_attention') else "") + " ──")
     lstm_trainer       = LSTMTrainer(LSTM_CONFIG, save_dir="models")
     lstm_model, history = lstm_trainer.train(sequences, targets)
 
@@ -110,27 +114,52 @@ def run_train(args):
     print(f"  Embeddings : {embeddings.shape}")
 
     # 9. Feature merger
-    print("\n  ── Fusion features (52) ──")
+    n_features = len(FEATURE_COLS)
+    print(f"\n  ── Fusion features ({n_features}) ──")
     merger   = FeatureMerger(LSTM_CONFIG['embedding_dim'])
     df_final = merger.merge(df, embeddings, seq_ids)
     df_final.to_parquet("data/processed/final_train.parquet", index=False)
     print(f"  final_train.parquet : {df_final.shape}")
 
-    # 10. CatBoost train
-    print("\n  ── CatBoost : Entraînement ──")
+    # 10. CatBoost train (avec calibration isotonique intégrée)
+    use_two_stage = getattr(args, 'two_stage', False)
+    print(f"\n  ── CatBoost : Entraînement"
+          + (" (two-stage)" if use_two_stage else "") + " ──")
     cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
-    model_low, model_high, results_low, results_high = cb_trainer.train(df_final)
+    if use_two_stage:
+        model_low, model_high, results_low, results_high = cb_trainer.train_two_stage(
+            df_final, calibrate=True
+        )
+        # two_stage retourne tuples (s1, s2, threshold) pour models
+        model_low_pred  = model_low[1]   # stage-2 pour SHAP
+        model_high_pred = model_high[1]
+    else:
+        model_low, model_high, results_low, results_high = cb_trainer.train(
+            df_final, calibrate=True
+        )
+        model_low_pred  = model_low
+        model_high_pred = model_high
 
-    # 11. Métriques
-    print("\n  ── Évaluation ──")
+    # 11. Métriques + seuil optimisé
+    print("\n  ── Évaluation + seuil optimal ──")
     evaluator = ModelEvaluator("outputs/metrics")
-    m_low  = evaluator.evaluate(
-        results_low['y_true'],  results_low['y_proba'],  "catboost_low_hybrid"
-    )
-    m_high = evaluator.evaluate(
-        results_high['y_true'], results_high['y_proba'], "catboost_high_hybrid"
-    )
-    evaluator.compare([m_low, m_high])
+
+    all_metrics = []
+    for seg_name, results in [("catboost_low_hybrid",  results_low),
+                               ("catboost_high_hybrid", results_high)]:
+        # Seuil F2 (rappel)
+        t_f2, _, _ = optimize_threshold(results['y_true'], results['y_proba'], strategy='f2')
+        # Seuil précision-cible 10%
+        t_pt, _, _ = optimize_threshold(results['y_true'], results['y_proba'],
+                                        strategy='precision_target', min_precision=0.10)
+        m_f2 = evaluator.evaluate(results['y_true'], results['y_proba'],
+                                  f"{seg_name}_f2",    threshold=t_f2)
+        m_pt = evaluator.evaluate(results['y_true'], results['y_proba'],
+                                  f"{seg_name}_prec10", threshold=t_pt)
+        all_metrics.extend([m_f2, m_pt])
+        print(f"  {seg_name} | seuil F2={t_f2:.3f}  seuil prec10={t_pt:.3f}")
+
+    evaluator.compare(all_metrics)
 
     # 12. SHAP
     print("\n  ── SHAP ──")
@@ -138,9 +167,9 @@ def run_train(args):
         FEATURE_COLS, CAT_FEATURES, LSTM_EMBEDDING_COLS,
         FEATURE_LABELS, SHAP_CONFIG['top_k'],
     )
-    shap_engine.run(df_final, model_low, model_high, "outputs/shap")
+    shap_engine.run(df_final, model_low_pred, model_high_pred, "outputs/shap")
 
-    # 13. Error analysis (sur le segment LOW pour illustration)
+    # 13. Error analysis
     print("\n  ── Analyse erreurs (segment LOW) ──")
     df_low_eval = df_final[df_final['revenu_principal'] <= revenu_treshold].copy()
     if len(df_low_eval) > 0 and 'target' in df_low_eval.columns:
@@ -204,10 +233,15 @@ def run_infer(args):
     df_final.to_parquet("data/processed/final_infer.parquet", index=False)
     print(f"  final_infer.parquet : {df_final.shape}")
 
-    # 10. CatBoost predict (split SIMPLE par revenu)
-    print("\n  ── CatBoost : Prédictions ──")
+    # 10. CatBoost predict (split SIMPLE par revenu, avec calibration si dispo)
+    use_two_stage = getattr(args, 'two_stage', False)
+    print(f"\n  ── CatBoost : Prédictions"
+          + (" (two-stage)" if use_two_stage else "") + " ──")
     cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
-    df_results = cb_trainer.predict(df_final, model_dir="models")
+    df_results = cb_trainer.predict(
+        df_final, model_dir="models",
+        use_two_stage=use_two_stage, use_calibration=True,
+    )
     print(f"\n  Résultats : {len(df_results):,} clients")
     print(f"  Positifs prédits : {int(df_results['prediction'].sum()):,}")
 
@@ -264,6 +298,8 @@ if __name__ == "__main__":
                         help="Fichier CSV custom pour l'inférence")
     parser.add_argument("--skip_shap", action="store_true",
                         help="Désactiver le calcul SHAP (infer uniquement)")
+    parser.add_argument("--two_stage", action="store_true",
+                        help="Entraînement / inférence two-stage (meilleure précision)")
     args = parser.parse_args()
 
     if args.mode == "train":

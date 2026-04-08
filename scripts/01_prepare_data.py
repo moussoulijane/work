@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pandas as pd
 from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
-from src.feature_engineering import add_balance_features
+from src.feature_engineering import add_balance_features, add_advanced_features
 from config import TRAIN_FILES
 
 if __name__ == "__main__":
@@ -26,6 +26,7 @@ if __name__ == "__main__":
     print(f"Après preprocess : {df.shape}")
 
     df = add_balance_features(df)
+    df = add_advanced_features(df)
     print(f"Après feature engineering : {df.shape}")
 
     if 'target' in df.columns:

@@ -11,6 +11,8 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import logging
 
+from src.catboost_trainer import _prepare_X
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,10 +65,12 @@ def optimize_catboost(
         fold_aucs = []
 
         for tr_idx, val_idx in skf.split(X, y):
-            X_tr, X_val = X.iloc[tr_idx], X.iloc[val_idx]
-            y_tr, y_val = y.iloc[tr_idx], y.iloc[val_idx]
+            X_tr_raw, X_val_raw = X.iloc[tr_idx], X.iloc[val_idx]
+            y_tr, y_val         = y.iloc[tr_idx], y.iloc[val_idx]
 
-            # Cat features par indices (CatBoost attend des entiers)
+            # _prepare_X gère cast float/str et fillna → pas de ValueError
+            X_tr  = _prepare_X(X_tr_raw,  list(X.columns), cat_features)
+            X_val = _prepare_X(X_val_raw, list(X.columns), cat_features)
             col_list = X_tr.columns.tolist()
             cat_idx  = [col_list.index(c) for c in cat_features if c in col_list]
 
@@ -75,14 +79,6 @@ def optimize_catboost(
             if n_pos == 0:
                 return 0.5
             params['scale_pos_weight'] = n_neg / n_pos
-
-            # Nettoyage cat features
-            X_tr  = X_tr.copy()
-            X_val = X_val.copy()
-            for c in cat_features:
-                if c in X_tr.columns:
-                    X_tr[c]  = X_tr[c].fillna('INCONNU').astype(str)
-                    X_val[c] = X_val[c].fillna('INCONNU').astype(str)
 
             model = CatBoostClassifier(**params)
             model.fit(
