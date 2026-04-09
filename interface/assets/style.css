@@ -1,0 +1,58 @@
+/* AWB — Interface Crédit Conso */
+
+/* Couleurs de marque */
+:root {
+    --awb-red:   #C8102E;
+    --awb-dark:  #1A1A2E;
+    --awb-light: #F5F5F5;
+}
+
+/* En-tête */
+.stApp header {
+    background-color: var(--awb-red);
+}
+
+/* Bouton principal */
+.stButton > button[kind="primary"] {
+    background-color: var(--awb-red);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-weight: bold;
+    padding: 0.5rem 1.5rem;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #a50d25;
+    color: white;
+}
+
+/* Séparateur de section */
+hr {
+    border-color: var(--awb-red);
+    border-width: 1px;
+}
+
+/* Cards métriques */
+[data-testid="metric-container"] {
+    background-color: var(--awb-light);
+    border-radius: 8px;
+    padding: 0.75rem;
+    border-left: 4px solid var(--awb-red);
+}
+
+/* Expanders */
+.streamlit-expanderHeader {
+    font-weight: bold;
+    color: var(--awb-dark);
+}
+
+/* Input box */
+.stTextInput > div > div > input {
+    border-radius: 6px;
+    border: 2px solid var(--awb-red);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f1f1f1; }
+::-webkit-scrollbar-thumb { background: var(--awb-red); border-radius: 3px; }

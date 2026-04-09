@@ -1,0 +1,7 @@
+{profile_block}
+
+{risk_block}
+
+{offer_block}
+
+{format_block}

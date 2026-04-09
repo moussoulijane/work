@@ -1,0 +1,31 @@
+# Mots et expressions interdits dans les narrations LLM
+banned_words:
+  # Exagérations commerciales
+  - "exceptionnel"
+  - "unique"
+  - "extraordinaire"
+  - "incroyable"
+  - "opportunité rare"
+  - "offre exceptionnelle"
+  - "jamais vue"
+  - "sans précédent"
+  # Fausses garanties
+  - "garantie"
+  - "sans risque"
+  - "100%"
+  - "assuré"
+  - "certifié"
+  # Jargon technique ML
+  - "shap"
+  - "embedding"
+  - "lstm"
+  - "catboost"
+  - "machine learning"
+  - "algorithme"
+  - "modèle prédictif"
+  - "intelligence artificielle"
+  - "scoring automatique"
+  # Promesses sur l'avenir
+  - "vous allez économiser"
+  - "votre situation va s'améliorer"
+  - "vous serez"

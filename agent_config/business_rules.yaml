@@ -1,0 +1,126 @@
+# ═══════════════════════════════════════════════════════════
+# Règles métier AWB — Crédit Consommation
+# Paramétrables par l'équipe risque sans toucher au code
+# ═══════════════════════════════════════════════════════════
+
+exclusion_rules:
+  - id: R1
+    description: "Revenu insuffisant"
+    condition: "revenu_principal < 3000"
+    motif: "Revenu inférieur au seuil minimum AWB (3000 MAD)"
+    rebond: "revenu_insuffisant"
+
+  - id: R2
+    description: "Taux d'endettement saturé"
+    condition: "taux_endettement_actuel > 0.40"
+    motif: "Taux d'endettement déjà au-delà du plafond réglementaire (40%)"
+    rebond: "endettement_sature"
+
+  - id: R3
+    description: "Incidents de paiement récurrents"
+    condition: "nb_decouverts_3m > 15"
+    motif: "Plus de 15 jours de découvert sur les 3 derniers mois"
+    rebond: "incidents_paiement"
+
+  - id: R4
+    description: "Hors cible d'âge"
+    condition: "age < 21 or age > 70"
+    motif: "Âge en dehors de la cible crédit conso AWB (21-70 ans)"
+    rebond: "age_hors_cible"
+
+  - id: R5
+    description: "Profil non vérifiable"
+    condition: "type_revenu == 'AUTRE' and revenu_principal < 5000"
+    motif: "Type de revenu non standard avec niveau faible"
+    rebond: "profil_non_verifiable"
+
+  - id: R6
+    description: "Découvert structurel"
+    condition: "solde_min < -2 * revenu_principal"
+    motif: "Découvert supérieur à 2 fois le revenu mensuel"
+    rebond: "incidents_paiement"
+
+scoring:
+  capacite_remboursement:
+    max_points: 30
+    sub_dimensions:
+      taux_endettement:
+        max: 15
+        tiers:
+          - {threshold: 0.20, points: 15}
+          - {threshold: 0.30, points: 10}
+          - {threshold: 0.35, points: 5}
+      capacite_residuelle:
+        max: 15
+        tiers:
+          - {threshold: 3000, points: 15}
+          - {threshold: 2000, points: 10}
+          - {threshold: 1000, points: 5}
+
+  stabilite_financiere:
+    max_points: 25
+    sub_dimensions:
+      stabilite_revenu:
+        max: 10
+      tendance_compte:
+        positive: 10
+        neutre: 5
+        negative: 0
+      decouverts:
+        zero: 5
+        faible: 3
+        eleve: 0
+
+  profil_revenu:
+    max_points: 20
+    mapping:
+      SALARIE: 20
+      RETRAITE: 18
+      PROFESSION_LIBERALE: 15
+      COMMERCANT: 12
+      AUTRE: 8
+
+  historique_bancaire:
+    max_points: 15
+    sub_dimensions:
+      ratio_epargne:
+        max: 10
+        tiers:
+          - {threshold: 2.0, points: 10}
+          - {threshold: 1.0, points: 7}
+          - {threshold: 0.5, points: 4}
+      solde_max_observé:
+        max: 5
+        tiers:
+          - {threshold: 50000, points: 5}
+          - {threshold: 20000, points: 3}
+
+  signal_appetence:
+    max_points: 10
+
+rating_grid:
+  - {min: 85, max: 100, note: A, decision: APPROUVE, label: "Profil premium"}
+  - {min: 70, max: 84,  note: B, decision: APPROUVE, label: "Bon profil"}
+  - {min: 55, max: 69,  note: C, decision: APPROUVE, label: "Profil acceptable"}
+  - {min: 40, max: 54,  note: D, decision: INSTRUCTION, label: "Profil à instruire"}
+  - {min: 0,  max: 39,  note: E, decision: REFUS, label: "Refus"}
+
+zones_risque:
+  STAR:
+    conditions: "appetence_forte and profil_sain and revenu >= 7000"
+    priorite_commerciale: 1
+  CROISSANCE:
+    conditions: "appetence_forte and profil_sain and revenu < 7000"
+    priorite_commerciale: 2
+  PRUDENCE:
+    conditions: "appetence_forte and profil_fragile"
+    priorite_commerciale: 4
+  DORMANT:
+    conditions: "appetence_moyenne and profil_sain"
+    priorite_commerciale: 3
+  FIDELISATION:
+    conditions: "appetence_faible and profil_sain"
+    priorite_commerciale: 5
+  EXCLUSION:
+    conditions: "appetence_faible and profil_fragile"
+    priorite_commerciale: 6
