@@ -1,233 +1,229 @@
 """
-Génération de la fiche client en PDF via ReportLab.
-Retourne les bytes du PDF pour téléchargement Streamlit.
+Génération de la fiche en PDF via ReportLab.
+Layout : 1-2 pages A4, charte AWB.
 """
-from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.lib.colors import HexColor, white
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import io
 from datetime import datetime
 
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-    from reportlab.lib import colors
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        HRFlowable,
-    )
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
+
+AWB_RED = HexColor('#C8102E')
+AWB_DARK = HexColor('#2C3E50')
+LIGHT_GRAY = HexColor('#F8F9FA')
 
 
-# ─── Couleurs AWB ───
-AWB_RED   = colors.HexColor('#C8102E')
-AWB_GRAY  = colors.HexColor('#F5F5F5')
-AWB_DARK  = colors.HexColor('#333333')
-GREEN     = colors.HexColor('#4CAF50')
-ORANGE    = colors.HexColor('#FF9800')
-RED_LIGHT = colors.HexColor('#F44336')
-
-DECISION_COLORS_RL = {
-    'APPROUVE':    GREEN,
-    'INSTRUCTION': ORANGE,
-    'REFUS':       RED_LIGHT,
-}
-
-
-def generate_pdf(fiche: dict) -> bytes:
+def generate_pdf(fiche):
     """
-    Génère un PDF de la fiche client.
-
+    Génère une fiche PDF.
+    
+    Args:
+        fiche: dict — fiche complète
+    
     Returns:
-        bytes du PDF, ou PDF minimaliste si ReportLab absent.
+        bytes — contenu PDF
     """
-    if not REPORTLAB_AVAILABLE:
-        return _fallback_text_pdf(fiche)
-
-    buf = BytesIO()
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        leftMargin=1.5*cm, rightMargin=1.5*cm,
+        buffer,
+        pagesize=A4,
         topMargin=1.5*cm, bottomMargin=1.5*cm,
+        leftMargin=1.5*cm, rightMargin=1.5*cm
     )
-
-    styles  = getSampleStyleSheet()
-    story   = []
-    meta    = fiche['meta']
-    profil  = fiche['profil']
-    risque  = fiche['risque']
-    offres  = fiche['offres']
-    narr    = fiche['narration']
-    s       = profil['signaletique']
-    sv      = profil['solvabilite']
-    c       = profil['comportement']
-    a       = profil['appetence']
-
-    # ── Styles ──
-    h1 = ParagraphStyle('h1', parent=styles['Heading1'],
-                        textColor=AWB_RED, fontSize=16, spaceAfter=4)
-    h2 = ParagraphStyle('h2', parent=styles['Heading2'],
-                        textColor=AWB_DARK, fontSize=12, spaceAfter=2)
-    body = ParagraphStyle('body', parent=styles['Normal'],
-                          fontSize=9, leading=13)
-    caption = ParagraphStyle('caption', parent=styles['Normal'],
-                             fontSize=8, textColor=colors.gray)
-
+    
+    story = []
+    styles = getSampleStyleSheet()
+    
+    # Styles custom
+    title_style = ParagraphStyle(
+        'Title', parent=styles['Heading1'],
+        fontSize=16, textColor=AWB_RED, alignment=TA_CENTER,
+        spaceAfter=12
+    )
+    subtitle_style = ParagraphStyle(
+        'Subtitle', parent=styles['Heading2'],
+        fontSize=12, textColor=AWB_DARK, spaceAfter=8, spaceBefore=12
+    )
+    normal = styles['Normal']
+    
     # ── En-tête ──
-    decision_color = DECISION_COLORS_RL.get(risque['decision'], AWB_DARK)
-    story.append(Paragraph("Attijariwafa Bank — Fiche Crédit Consommation", h1))
-    story.append(HRFlowable(width='100%', color=AWB_RED, thickness=2))
-    story.append(Spacer(1, 6))
-
-    header_data = [
-        [
-            Paragraph(f"<b>Client #{meta['id_client']}</b>", body),
-            Paragraph(f"Zone : <b>{profil['zone_risque']}</b>", body),
-            Paragraph(
-                f"<font color='#{_hex(decision_color)}'><b>{risque['decision']}</b></font>",
-                body
-            ),
-            Paragraph(f"Note <b>{risque['note']}</b> — {risque['score']}/100", body),
-        ]
-    ]
-    header_table = Table(header_data, colWidths=[4*cm, 4*cm, 4*cm, 4.5*cm])
-    header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), AWB_GRAY),
-        ('BOX',        (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ('INNERGRID',  (0, 0), (-1, -1), 0.25, colors.lightgrey),
-        ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(header_table)
-    story.append(Spacer(1, 8))
     story.append(Paragraph(
-        f"Généré le {meta['generated_at'][:19].replace('T', ' à ')} | "
-        f"Source : {narr.get('source', '–')}",
-        caption,
+        "ATTIJARIWAFA BANK<br/>Fiche d'analyse crédit consommation",
+        title_style
     ))
-    story.append(Spacer(1, 10))
-
-    # ── Résumé ──
-    story.append(Paragraph("Résumé exécutif", h2))
-    story.append(Paragraph(narr.get('resume_executif', '–'), body))
-    story.append(Spacer(1, 8))
-
-    # ── Profil ──
-    story.append(Paragraph("Profil client", h2))
-    profil_data = [
-        ['Signalétique', 'Solvabilité', 'Comportement'],
-        [
-            f"{s['age']} ans, {s['type_revenu']}\n{s['segment']}\n{s['revenu_principal']:,.0f} MAD",
-            f"Endettement : {sv['taux_endettement_actuel']:.1%}\n"
-            f"Capacité : {sv['capacite_mensuelle_residuelle']:,.0f} MAD\n"
-            f"Épargne : {sv['ratio_epargne']:.1f}x",
-            f"Solde moy. : {c['solde_moyen']:,.0f} MAD\n"
-            f"Tendance : {c['tendance_compte']:+.0f} MAD/j\n"
-            f"Découverts : {c['nb_decouverts_3m']} j",
-        ],
+    
+    story.append(Paragraph(
+        f"Client #{fiche['metadata']['id_client']} — "
+        f"Généré le {datetime.fromisoformat(fiche['metadata']['date_generation']).strftime('%d/%m/%Y %H:%M')}",
+        ParagraphStyle('meta', parent=normal, alignment=TA_CENTER, fontSize=9)
+    ))
+    story.append(Spacer(1, 0.5*cm))
+    
+    # ── Bloc Identité ──
+    story.append(Paragraph("1. PROFIL CLIENT", subtitle_style))
+    
+    p = fiche['profil']
+    s = p['signaletique']
+    sv = p['solvabilite']
+    c = p['comportement']
+    
+    identity_data = [
+        ['Âge', f"{s['age']} ans", 'Type revenu', s['type_revenu']],
+        ['Segment', s['segment'], 'Revenu', f"{s['revenu_principal']:,.0f} MAD"],
+        ['Taux endettement', f"{sv['taux_endettement_actuel']:.0%}", 
+         'Capacité résiduelle', f"{sv['capacite_mensuelle_residuelle']:,.0f} MAD"],
+        ['Solde moyen', f"{c['solde_moyen']:,.0f} MAD",
+         'Découverts 3M', f"{c['nb_decouverts_3m']} jours"],
     ]
-    profil_table = Table(profil_data, colWidths=[5.4*cm, 5.4*cm, 5.6*cm])
-    profil_table.setStyle(TableStyle([
-        ('BACKGROUND',    (0, 0), (-1, 0), AWB_RED),
-        ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
-        ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BACKGROUND',    (0, 1), (-1, -1), AWB_GRAY),
-        ('BOX',           (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ('INNERGRID',     (0, 0), (-1, -1), 0.25, colors.lightgrey),
-        ('FONTSIZE',      (0, 0), (-1, -1), 8),
-        ('VALIGN',        (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING',    (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+    
+    t = Table(identity_data, colWidths=[3.5*cm, 4.5*cm, 3.5*cm, 4.5*cm])
+    t.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('BACKGROUND', (0, 0), (0, -1), LIGHT_GRAY),
+        ('BACKGROUND', (2, 0), (2, -1), LIGHT_GRAY),
+        ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#DDDDDD')),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('PADDING', (0, 0), (-1, -1), 6),
     ]))
-    story.append(profil_table)
-    story.append(Spacer(1, 8))
-
-    # ── Offre ──
-    story.append(Paragraph("Offre commerciale", h2))
-    if offres['offre_principale']:
-        op = offres['offre_principale']
+    story.append(t)
+    story.append(Spacer(1, 0.4*cm))
+    
+    # ── Bloc Scoring ──
+    story.append(Paragraph("2. ANALYSE RISQUE", subtitle_style))
+    
+    risk = fiche['analyse_risque']
+    
+    # Pastille note
+    note_color = {'A': '#28a745', 'B': '#5cb85c', 'C': '#f0ad4e',
+                  'D': '#ff7043', 'E': '#d9534f'}.get(risk['note'], '#666')
+    
+    scoring_data = [[
+        f"NOTE {risk['note']}",
+        f"Score : {risk['score']}/100",
+        f"Décision : {risk['decision']}",
+        f"Zone : {p['zone_risque']}",
+    ]]
+    t = Table(scoring_data, colWidths=[3*cm, 4*cm, 4.5*cm, 4.5*cm])
+    t.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (0, 0), 14),
+        ('FONTSIZE', (1, 0), (-1, -1), 10),
+        ('BACKGROUND', (0, 0), (0, 0), HexColor(note_color)),
+        ('TEXTCOLOR', (0, 0), (0, 0), white),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('PADDING', (0, 0), (-1, -1), 10),
+        ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#DDDDDD')),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 0.3*cm))
+    
+    # Points forts / attention
+    if risk.get('points_forts'):
+        story.append(Paragraph("<b>Points forts :</b>", normal))
+        for pf in risk['points_forts']:
+            story.append(Paragraph(f"• {pf}", normal))
+    
+    if risk.get('points_attention'):
+        story.append(Paragraph("<b>Points d'attention :</b>", normal))
+        for pa in risk['points_attention']:
+            story.append(Paragraph(f"• {pa}", normal))
+    
+    story.append(Spacer(1, 0.4*cm))
+    
+    # ── Bloc Offre ──
+    offers = fiche['offres']
+    
+    if risk['decision'] != 'REFUS' and offers.get('offre_principale'):
+        story.append(Paragraph("3. OFFRE COMMERCIALE", subtitle_style))
+        
+        op = offers['offre_principale']
         offer_data = [
-            ['Montant', 'Durée', 'Taux', 'Mensualité', 'Coût total', 'TEG'],
-            [
-                f"{op['montant']:,} MAD",
-                f"{op['duree_mois']} mois",
-                f"{op['taux_annuel']:.2%}",
-                f"{op['mensualite_totale']:,.0f} MAD",
-                f"{op['cout_total_credit']:,.0f} MAD",
-                f"{op['teg']:.2%}",
-            ],
+            ['Montant', f"{op['montant']:,} MAD", 'Durée', f"{op['duree_mois']} mois"],
+            ['Taux annuel', f"{op['taux_annuel']:.2%}", 'TEG', f"{op['teg']:.2%}"],
+            ['Mensualité', f"{op['mensualite']:,.0f} MAD", 
+             'Coût total', f"{op['cout_total_credit']:,.0f} MAD"],
         ]
-        offer_table = Table(offer_data, colWidths=[2.8*cm]*6)
-        offer_table.setStyle(TableStyle([
-            ('BACKGROUND',    (0, 0), (-1, 0), AWB_RED),
-            ('TEXTCOLOR',     (0, 0), (-1, 0), colors.white),
-            ('FONTNAME',      (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('BACKGROUND',    (0, 1), (-1, -1), colors.white),
-            ('BOX',           (0, 0), (-1, -1), 0.5, colors.lightgrey),
-            ('INNERGRID',     (0, 0), (-1, -1), 0.25, colors.lightgrey),
-            ('FONTSIZE',      (0, 0), (-1, -1), 8),
-            ('ALIGN',         (0, 0), (-1, -1), 'CENTER'),
-            ('TOPPADDING',    (0, 0), (-1, -1), 5),
+        t = Table(offer_data, colWidths=[3.5*cm, 4.5*cm, 3.5*cm, 4.5*cm])
+        t.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BACKGROUND', (0, 0), (0, -1), AWB_RED),
+            ('TEXTCOLOR', (0, 0), (0, -1), white),
+            ('BACKGROUND', (2, 0), (2, -1), LIGHT_GRAY),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#DDDDDD')),
+            ('PADDING', (0, 0), (-1, -1), 8),
         ]))
-        story.append(offer_table)
+        story.append(t)
     else:
-        rebond = offres.get('rebond', {})
+        # Refus + rebond
+        story.append(Paragraph("3. DÉCISION", subtitle_style))
         story.append(Paragraph(
-            f"Refus — Rebond : {rebond.get('produit', '–')}", body
+            f"<b>REFUS</b> — {risk.get('motif_refus', 'Critères non remplis')}",
+            normal
         ))
-    story.append(Spacer(1, 8))
-
-    # ── Argumentation ──
-    story.append(Paragraph("Argumentation commerciale", h2))
-    story.append(Paragraph(narr.get('argumentation_commerciale', '–'), body))
-    story.append(Spacer(1, 6))
-
-    story.append(Paragraph("Justification du taux", h2))
-    story.append(Paragraph(narr.get('justification_taux', '–'), body))
-    story.append(Spacer(1, 6))
-
-    # ── Points de vigilance ──
-    story.append(Paragraph("Points de vigilance", h2))
-    for point in narr.get('points_de_vigilance', []):
-        story.append(Paragraph(f"• {point}", body))
-    story.append(Spacer(1, 6))
-
-    # ── Script d'appel ──
-    story.append(Paragraph("Script d'appel", h2))
-    story.append(Paragraph(narr.get('script_appel', '–'), body))
-
+        if offers and offers.get('rebond'):
+            rebond = offers['rebond']
+            story.append(Paragraph(
+                f"<b>Rebond produit</b> : {rebond['produit']}<br/>{rebond['argument']}",
+                normal
+            ))
+    
+    story.append(Spacer(1, 0.4*cm))
+    
+    # ── Bloc Argumentation ──
+    story.append(Paragraph("4. ARGUMENTATION", subtitle_style))
+    
+    narr = fiche['narration']
+    story.append(Paragraph(f"<b>Résumé :</b> {narr['resume_executif']}", normal))
+    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(narr['argumentation_commerciale'], normal))
+    story.append(Spacer(1, 0.2*cm))
+    
+    if narr.get('justification_taux'):
+        story.append(Paragraph(
+            f"<i>{narr['justification_taux']}</i>",
+            ParagraphStyle('italic', parent=normal, textColor=HexColor('#555'))
+        ))
+    
+    story.append(Spacer(1, 0.3*cm))
+    
+    # ── Bloc Script ──
+    story.append(Paragraph("5. SCRIPT D'APPEL", subtitle_style))
+    
+    script_table = Table(
+        [[Paragraph(narr['script_appel'], normal)]],
+        colWidths=[16*cm]
+    )
+    script_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), HexColor('#FFF3CD')),
+        ('BOX', (0, 0), (-1, -1), 1, HexColor('#FFC107')),
+        ('PADDING', (0, 0), (-1, -1), 12),
+    ]))
+    story.append(script_table)
+    
+    if narr.get('points_de_vigilance'):
+        story.append(Spacer(1, 0.3*cm))
+        story.append(Paragraph("<b>Vigilances :</b>", normal))
+        for pv in narr['points_de_vigilance']:
+            story.append(Paragraph(f"• {pv}", normal))
+    
+    # ── Pied de page ──
+    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph(
+        "<i>Document généré automatiquement — À valider par le conseiller</i>",
+        ParagraphStyle('footer', parent=normal, fontSize=8,
+                      textColor=HexColor('#999'), alignment=TA_CENTER)
+    ))
+    
     doc.build(story)
-    return buf.getvalue()
+    buffer.seek(0)
+    return buffer.getvalue()
 
-
-def _hex(color) -> str:
-    """Convertit une couleur ReportLab en hex sans '#'."""
-    try:
-        r, g, b = int(color.red * 255), int(color.green * 255), int(color.blue * 255)
-        return f"{r:02X}{g:02X}{b:02X}"
-    except Exception:
-        return "333333"
-
-
-def _fallback_text_pdf(fiche: dict) -> bytes:
-    """PDF minimaliste en texte si ReportLab n'est pas installé."""
-    lines = [
-        "ATTIJARIWAFA BANK — FICHE CRÉDIT CONSOMMATION",
-        "=" * 50,
-        f"Client : {fiche['meta']['id_client']}",
-        f"Date   : {fiche['meta']['generated_at'][:19]}",
-        f"Décision : {fiche['risque']['decision']} (Note {fiche['risque']['note']}, {fiche['risque']['score']}/100)",
-        "",
-        "RÉSUMÉ",
-        fiche['narration'].get('resume_executif', '–'),
-        "",
-        "ARGUMENTATION",
-        fiche['narration'].get('argumentation_commerciale', '–'),
-        "",
-        "SCRIPT D'APPEL",
-        fiche['narration'].get('script_appel', '–'),
-    ]
-    content = "\n".join(lines).encode('utf-8')
-    # Retourner comme bytes bruts (pas un vrai PDF mais téléchargeable)
-    return content

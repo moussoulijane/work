@@ -38,7 +38,7 @@ VALIDATION_CONFIG = {
         'points_de_vigilance',
         'script_appel'
     ],
-    'min_language_fr_ratio': 0.8,
+    'min_language_fr_ratio': 0.8,  # Proportion de mots français détectés
 }
 
 # ========== INTERFACE STREAMLIT ==========
@@ -73,3 +73,4 @@ REBOND_PRODUITS = {
         'argument': 'Compléter votre dossier pour accéder à nos services crédit'
     },
 }
+

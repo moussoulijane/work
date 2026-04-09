@@ -1,150 +1,173 @@
 """
-Exécute le pipeline ML complet sur un seul client.
-
-Réutilise EXACTEMENT les mêmes étapes que main.py inference :
-  preprocess → add_balance_features → add_advanced_features
-  → SequenceBuilder.transform → LSTMEncoder.extract_embeddings
-  → FeatureMerger → CatBoostTrainer.predict → SHAPEngine
-
-Retourne : proba, top_5_shap, lstm_shap_aggregated
+Exécute le pipeline ML sur UN SEUL client.
+Réutilise les fonctions du dossier src/ (pas de duplication).
 """
-import os
-import numpy as np
 import pandas as pd
+import numpy as np
 import torch
-import streamlit as st
+import os
 
 from src.preprocessing import preprocess
-from src.feature_engineering import add_balance_features, add_advanced_features
+from src.feature_engineering import add_balance_features
 from src.sequence_builder import SequenceBuilder
-from src.lstm_model import LSTMTrainer, build_lstm_encoder
+from src.lstm_model import LSTMEncoder, LSTMTrainer
 from src.feature_merger import FeatureMerger
-from src.catboost_trainer import _prepare_X
 from src.shap_engine import SHAPEngine
 from catboost import CatBoostClassifier
+from catboost import Pool
+
 from config import (
     FEATURE_COLS, CAT_FEATURES, LSTM_CONFIG, LSTM_EMBEDDING_COLS,
-    revenu_treshold, SHAP_CONFIG, FEATURE_LABELS,
+    FEATURE_LABELS, revenu_treshold
 )
 
 
-@st.cache_resource(show_spinner="Chargement des modèles ML...")
-def load_models(models_dir: str = "models"):
-    """Charge les 4 artefacts ML une seule fois (cache Streamlit)."""
-    required = {
-        'scaler':  os.path.join(models_dir, 'lstm_scaler.pkl'),
-        'encoder': os.path.join(models_dir, 'lstm_encoder.pt'),
-        'low':     os.path.join(models_dir, f'{revenu_treshold}_catboost_low.cbm'),
-        'high':    os.path.join(models_dir, f'{revenu_treshold}_catboost_high.cbm'),
-    }
-    for name, path in required.items():
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"Artefact '{name}' introuvable : {path}\n"
-                "Lance d'abord : python main.py train"
-            )
-
-    # LSTM
-    seq_builder = SequenceBuilder(scaler_path=required['scaler'])
-    device = torch.device('cpu')
-    encoder = build_lstm_encoder(LSTM_CONFIG)
-    encoder.load_state_dict(torch.load(required['encoder'], map_location=device, weights_only=True))
-    encoder.eval()
-
-    # CatBoost
-    cb_low  = CatBoostClassifier(); cb_low.load_model(required['low'])
-    cb_high = CatBoostClassifier(); cb_high.load_model(required['high'])
-
-    return seq_builder, encoder, cb_low, cb_high
-
-
-def run_pipeline(client_row: pd.Series, models_dir: str = "models") -> dict:
+class ScoringRunner:
     """
-    Exécute le pipeline ML complet sur une ligne client.
-
-    Returns:
-        dict avec proba, top_5_shap, lstm_shap_aggregated
+    Enchaîne le pipeline ML pour un seul client.
+    Charge les modèles une seule fois (cache).
     """
-    seq_builder, encoder, cb_low, cb_high = load_models(models_dir)
+    
+    def __init__(self):
+        self._check_artifacts()
+        self.seq_builder = SequenceBuilder("models/lstm_scaler.pkl")
+        self.lstm_model = self._load_lstm()
+        self.lstm_trainer = LSTMTrainer(LSTM_CONFIG)
+        self.merger = FeatureMerger(LSTM_CONFIG['embedding_dim'])
+        self.model_low = self._load_catboost('low')
+        self.model_high = self._load_catboost('high')
+    
+    def _check_artifacts(self):
+        required = [
+            "models/lstm_scaler.pkl",
+            "models/lstm_encoder.pt",
+            f"models/{revenu_treshold}_catboost_low.cbm",
+            f"models/{revenu_treshold}_catboost_high.cbm",
+        ]
+        for f in required:
+            if not os.path.exists(f):
+                raise FileNotFoundError(
+                    f"❌ {f} manquant. Lance d'abord : python main.py train"
+                )
+    
+    def _load_lstm(self):
+        model = LSTMEncoder(
+            input_size=LSTM_CONFIG['input_size'],
+            hidden_size=LSTM_CONFIG['hidden_size'],
+            num_layers=LSTM_CONFIG['num_layers'],
+            dropout=LSTM_CONFIG['dropout'],
+            bidirectional=LSTM_CONFIG['bidirectional'],
+            embedding_dim=LSTM_CONFIG['embedding_dim'],
+        )
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model.load_state_dict(torch.load(
+            "models/lstm_encoder.pt", map_location=device, weights_only=True
+        ))
+        model.to(device).eval()
+        return model
+    
+    def _load_catboost(self, segment):
+        model = CatBoostClassifier()
+        model.load_model(f"models/{revenu_treshold}_catboost_{segment}.cbm")
+        return model
+    
+    def score_client(self, client_row):
+        """
+        Score un client unique.
+        
+        Args:
+            client_row: pd.Series avec toutes les features brutes
+        
+        Returns:
+            dict avec proba, segment, top_5_shap, lstm_shap_aggregated
+        """
+        # Convertir en DataFrame 1 ligne pour réutiliser les fonctions existantes
+        df = pd.DataFrame([client_row])
+        
+        # Preprocessing (même fonctions que le pipeline train/infer)
+        df = preprocess(df)
+        df = add_balance_features(df)
+        
+        # Séquences LSTM (transform seulement, charge le scaler)
+        sequences, seq_ids = self.seq_builder.transform(df)
+        
+        # Extraction embeddings
+        embeddings = self.lstm_trainer.extract_embeddings(
+            self.lstm_model, sequences, batch_size=1
+        )
+        
+        # Fusion features
+        df_final = self.merger.merge(df, embeddings, seq_ids)
+        
+        # Sélectionner les 52 features
+        available = [f for f in FEATURE_COLS if f in df_final.columns]
+        X = df_final[available].copy()
+        
+        # Déterminer le segment
+        revenu = float(df_final['revenu_principal'].iloc[0])
+        if revenu <= revenu_treshold:
+            model = self.model_low
+            segment_model = 'LOW'
+        else:
+            model = self.model_high
+            segment_model = 'HIGH'
+        
+        # Prédire
+        proba = float(model.predict_proba(X)[0, 1])
+        prediction = int(proba >= 0.5)
+        
+        # SHAP
+        cat_idx = [available.index(c) for c in CAT_FEATURES if c in available]
+        pool = Pool(X, cat_features=cat_idx)
+        raw_shap = model.get_feature_importance(data=pool, type='ShapValues')
+        shap_values = raw_shap[0, :-1]  # (52,) pour ce client
+        base_value = float(raw_shap[0, -1])
+        
+        # Agréger les 32 dims LSTM
+        lstm_indices = [i for i, n in enumerate(available) if n in LSTM_EMBEDDING_COLS]
+        non_lstm_indices = [i for i, n in enumerate(available) if n not in LSTM_EMBEDDING_COLS]
+        
+        shap_non_lstm = shap_values[non_lstm_indices]
+        shap_lstm = shap_values[lstm_indices]
+        lstm_magnitude = np.sum(np.abs(shap_lstm))
+        lstm_signed_sum = np.sum(shap_lstm)
+        lstm_aggregated = lstm_magnitude * np.sign(lstm_signed_sum)
+        
+        names_non_lstm = [available[i] for i in non_lstm_indices]
+        
+        # Construire la liste réduite + score LSTM agrégé
+        reduced_shap = list(zip(names_non_lstm, shap_non_lstm.tolist()))
+        reduced_shap.append(('lstm_embedding', float(lstm_aggregated)))
+        
+        # Top 5 par |SHAP|
+        reduced_shap.sort(key=lambda x: abs(x[1]), reverse=True)
+        top_5 = reduced_shap[:5]
+        
+        # Formatter le top 5
+        total_abs = sum(abs(s) for _, s in reduced_shap)
+        top_5_formatted = []
+        for rank, (feat, shap_val) in enumerate(top_5, 1):
+            feat_value = df_final[feat].iloc[0] if feat in df_final.columns else None
+            top_5_formatted.append({
+                'rank': rank,
+                'feature': feat,
+                'feature_label': FEATURE_LABELS.get(feat, feat),
+                'feature_value': float(feat_value) if feat_value is not None else None,
+                'shap_value': float(shap_val),
+                'direction': '+' if shap_val > 0 else '-',
+                'contribution_pct': abs(shap_val) / total_abs * 100 if total_abs > 0 else 0,
+            })
+        
+        # Enrichir client_row avec les indicateurs calculés
+        enriched_row = df_final.iloc[0].to_dict()
+        
+        return {
+            'client_row': enriched_row,
+            'proba': proba,
+            'prediction': prediction,
+            'segment_model': segment_model,
+            'top_5_shap': top_5_formatted,
+            'lstm_shap_aggregated': float(lstm_aggregated),
+            'base_value': base_value,
+        }
 
-    # ── 1. Construire un DataFrame d'un client ──
-    df = pd.DataFrame([client_row])
-
-    # ── 2. Preprocessing (même pipeline que main.py) ──
-    df = preprocess(df)
-    df = add_balance_features(df)
-    df = add_advanced_features(df)
-
-    # ── 3. LSTM : séquences → embeddings ──
-    sequences, ids = seq_builder.transform(df)
-
-    trainer = LSTMTrainer(config=LSTM_CONFIG)
-    embeddings = trainer.extract_embeddings(encoder, sequences, batch_size=1)
-
-    # ── 4. Fusion features ──
-    merger = FeatureMerger(embedding_dim=LSTM_CONFIG['embedding_dim'])
-    df_final = merger.merge(df, embeddings, ids)
-
-    # ── 5. Sélection segment ──
-    revenu = float(df_final['revenu_principal'].iloc[0]) if 'revenu_principal' in df_final.columns else 0
-    model = cb_high if revenu >= revenu_treshold else cb_low
-
-    # ── 6. Prédiction ──
-    X = _prepare_X(df_final, FEATURE_COLS, CAT_FEATURES)
-    proba = float(model.predict_proba(X)[0, 1])
-
-    # Calibration si disponible
-    seg = 'high' if revenu >= revenu_treshold else 'low'
-    cal_path = os.path.join(models_dir, f'calibrator_{seg}.pkl')
-    if os.path.exists(cal_path):
-        from src.calibration import ProbabilityCalibrator
-        cal = ProbabilityCalibrator.load(cal_path)
-        proba = float(cal.transform(np.array([proba]))[0])
-
-    # ── 7. SHAP ──
-    shap_engine = SHAPEngine(
-        feature_cols=FEATURE_COLS,
-        cat_features=CAT_FEATURES,
-        lstm_embedding_cols=LSTM_EMBEDDING_COLS,
-        feature_labels=FEATURE_LABELS,
-        top_k=SHAP_CONFIG['top_k'],
-    )
-    shap_values = shap_engine.compute_shap(model, X)  # (1, n_features)
-
-    # Top-5 SHAP pour ce client
-    available_cols = [c for c in FEATURE_COLS if c in X.columns]
-    top_5 = _extract_top5_shap(shap_values[0], available_cols, FEATURE_LABELS)
-
-    # LSTM SHAP agrégé
-    lstm_cols = [c for c in available_cols if c.startswith('lstm_emb_')]
-    lstm_shap_agg = 0.0
-    if lstm_cols and SHAP_CONFIG.get('aggregate_lstm_shap', True):
-        lstm_idx = [available_cols.index(c) for c in lstm_cols if c in available_cols]
-        if lstm_idx:
-            lstm_shap_vals = shap_values[0, lstm_idx]
-            lstm_shap_agg = float(np.sum(np.abs(lstm_shap_vals)) * np.sign(np.sum(lstm_shap_vals)))
-
-    return {
-        'proba': proba,
-        'top_5_shap': top_5,
-        'lstm_shap_aggregated': lstm_shap_agg,
-        'df_final': df_final,
-    }
-
-
-def _extract_top5_shap(shap_row: np.ndarray, feature_cols: list, labels: dict) -> list:
-    """Extrait les top-5 features par valeur absolue SHAP."""
-    pairs = sorted(
-        zip(feature_cols, shap_row),
-        key=lambda x: abs(x[1]),
-        reverse=True
-    )
-    result = []
-    for feat, val in pairs[:5]:
-        result.append({
-            'feature': feat,
-            'label': labels.get(feat, feat),
-            'shap_value': round(float(val), 4),
-            'direction': '+' if val > 0 else '-',
-        })
-    return result

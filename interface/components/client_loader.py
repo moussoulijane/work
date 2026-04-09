@@ -1,60 +1,77 @@
 """
-Chargement du fichier clients (Excel ou CSV) avec cache Streamlit.
-Recherche un client par id_client.
+Chargement de la base Excel + cache Streamlit.
+Les 3 fichiers (Excel principal + demographics + financials) sont chargés
+UNE SEULE FOIS au démarrage et gardés en mémoire.
 """
-import os
 import pandas as pd
 import streamlit as st
+from pathlib import Path
+
+from config import COMMON_FILES
 
 
-@st.cache_data(ttl=300, show_spinner="Chargement du fichier clients...")
-def load_clients_file(path: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_clients_database(excel_path):
     """
-    Charge le fichier clients depuis Excel ou CSV.
-    Mis en cache 5 minutes.
+    Charge le fichier Excel principal.
+    Cache Streamlit : chargé une seule fois par session.
     """
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Fichier clients introuvable : {path}\n"
-            "Vérifiez le chemin dans UI_CONFIG['default_excel_path']."
-        )
-
-    ext = os.path.splitext(path)[1].lower()
-    if ext in ('.xlsx', '.xls'):
-        df = pd.read_excel(path)
-    elif ext == '.csv':
-        # Tente ; puis ,
-        try:
-            df = pd.read_csv(path, sep=';', low_memory=False)
-            if df.shape[1] <= 1:
-                df = pd.read_csv(path, sep=',', low_memory=False)
-        except Exception:
-            df = pd.read_csv(path, low_memory=False)
-    else:
-        raise ValueError(f"Format non supporté : {ext}. Accepté : .xlsx, .xls, .csv")
-
+    if not Path(excel_path).exists():
+        return None
+    
+    df = pd.read_excel(excel_path)
+    
+    # Vérifier les colonnes critiques
+    required = ['id_client']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Colonnes manquantes dans l'Excel : {missing}")
+        return None
+    
     return df
 
 
-def find_client(df: pd.DataFrame, id_client) -> pd.Series | None:
-    """
-    Recherche un client par id_client dans le DataFrame.
-    Retourne la Series correspondante ou None si introuvable.
-    """
-    if 'id_client' not in df.columns:
-        raise KeyError("La colonne 'id_client' est absente du fichier clients.")
+@st.cache_data(show_spinner=False)
+def load_enrichment_files():
+    """Charge demographics + financials (fichiers fixes)."""
+    dfs = {}
+    for name, (path, sep) in COMMON_FILES.items():
+        try:
+            dfs[name] = pd.read_csv(path, sep=sep)
+        except FileNotFoundError:
+            dfs[name] = None
+    return dfs
 
-    # Convertir id_client dans le type de la colonne pour éviter les mismatch
-    col_dtype = df['id_client'].dtype
+
+def find_client(df_main, dfs_enrichment, id_client):
+    """
+    Recherche un client par id et l'enrichit.
+    
+    Returns:
+        pd.Series du client enrichi, ou None si introuvable
+    """
+    # Convertir l'id (l'utilisateur peut taper un str)
     try:
-        if pd.api.types.is_integer_dtype(col_dtype):
-            id_client = int(id_client)
-        else:
-            id_client = str(id_client)
-    except (ValueError, TypeError):
-        pass
-
-    result = df[df['id_client'] == id_client]
-    if result.empty:
+        id_num = int(id_client)
+    except ValueError:
         return None
-    return result.iloc[0]
+    
+    # Recherche
+    matches = df_main[df_main['id_client'] == id_num]
+    if len(matches) == 0:
+        return None
+    
+    client = matches.iloc[0].copy()
+    
+    # Enrichir avec demographics et financials
+    for name, df_enrich in dfs_enrichment.items():
+        if df_enrich is not None and 'id_client' in df_enrich.columns:
+            enrich_matches = df_enrich[df_enrich['id_client'] == id_num]
+            if len(enrich_matches) > 0:
+                enrich_row = enrich_matches.iloc[0]
+                for col in enrich_row.index:
+                    if col != 'id_client' and col not in client.index:
+                        client[col] = enrich_row[col]
+    
+    return client
+

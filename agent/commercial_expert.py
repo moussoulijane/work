@@ -5,8 +5,9 @@ Transforme la décision risque en offre commerciale concrète :
 - Montant maximum (3 contraintes, prendre le min)
 - Durée adaptée
 - Taux selon grille (note + durée + segment + bonifications)
-- Mensualité, coût total, TEG
-- 3 variantes : principale, confort, économie
+- Mensualité calculée
+- Coût total du crédit
+- 3 variantes (principale, confort, économie)
 - Rebond produit si refus
 """
 import yaml
@@ -14,18 +15,28 @@ import math
 
 
 class CommercialExpert:
-
+    
     def __init__(self, grid_path='agent_config/pricing_grid.yaml'):
         with open(grid_path, 'r', encoding='utf-8') as f:
             self.grid = yaml.safe_load(f)
+        
+        # Charger aussi les rebonds depuis config_agent
         from agent.config_agent import REBOND_PRODUITS
         self.rebonds = REBOND_PRODUITS
-
+    
     def build_offers(self, profile_enriched, risk_decision):
         """
+        Args:
+            profile_enriched: dict — sortie de ProfileEnricher
+            risk_decision: dict — sortie de RiskExpert
+        
         Returns:
-            dict avec offre_principale, offres_alternatives, rebond
+            dict avec :
+                - offre_principale: dict
+                - offres_alternatives: {confort: dict, economie: dict}
+                - rebond: dict (si refus)
         """
+        # Cas refus → rebond produit
         if risk_decision['decision'] == 'REFUS':
             rebond_key = risk_decision.get('rebond_key', 'profil_non_verifiable')
             return {
@@ -33,32 +44,36 @@ class CommercialExpert:
                 'offres_alternatives': None,
                 'rebond': self.rebonds.get(rebond_key, {
                     'produit': 'Rendez-vous en agence',
-                    'argument': "Discuter d'autres solutions adaptées"
+                    'argument': 'Discuter d\\'autres solutions adaptées'
                 })
             }
-
+        
+        # Cas approuvé ou instruction → calculer les offres
         note = risk_decision['note']
         segment = profile_enriched['signaletique']['segment']
         revenu = profile_enriched['signaletique']['revenu_principal']
-        mensualite_max = (
-            revenu * self.grid['ratio_mensualite_max']
-            - profile_enriched['solvabilite']['mensualites_actuelles']
-        )
-
+        mensualite_max = revenu * self.grid['ratio_mensualite_max'] - \\
+                        profile_enriched['solvabilite']['mensualites_actuelles']
+        
+        # 3 contraintes de montant
         plafond_note = self.grid['plafonds'][note]
         montant_max_note = plafond_note['montant_max']
         duree_max_note = plafond_note['duree_max']
-
+        
         mult_segment = self.grid['multiplicateurs_segment'].get(segment, 8)
         montant_max_segment = revenu * mult_segment
-
+        
+        # Montant max = min des 3 contraintes
+        # Pour la contrainte capacité, on inverse la formule mensualité
         taux_base_60 = self.grid['taux_base'][note]
         montant_max_capacite = self._pv_from_payment(
-            max(mensualite_max, 0), taux_base_60 / 12, 60
+            mensualite_max, taux_base_60 / 12, 60
         )
-
-        montant_max = max(0, min(montant_max_note, montant_max_segment, montant_max_capacite))
-
+        
+        montant_max = min(montant_max_note, montant_max_segment, montant_max_capacite)
+        montant_max = max(0, montant_max)
+        
+        # Construire les 3 offres
         offre_principale = self._build_single_offer(
             montant_max * 0.70, 48, note, segment, profile_enriched, 'PRINCIPALE'
         )
@@ -68,7 +83,7 @@ class CommercialExpert:
         offre_economie = self._build_single_offer(
             montant_max * 0.80, 36, note, segment, profile_enriched, 'ECONOMIE'
         )
-
+        
         return {
             'offre_principale': offre_principale,
             'offres_alternatives': {
@@ -77,28 +92,38 @@ class CommercialExpert:
             },
             'rebond': None,
         }
-
+    
     def _build_single_offer(self, montant_brut, duree, note, segment, profile, type_offre):
+        """Construit une offre avec tous les calculs financiers."""
+        # Arrondir le montant au millier inférieur
         montant = math.floor(montant_brut / 1000) * 1000
-        montant = max(5000, montant)
-
+        montant = max(5000, montant)  # Minimum 5000 MAD
+        
+        # Calculer le taux final avec majorations
         taux = self._compute_rate(note, duree, segment, profile)
+        
+        # Mensualité (formule standard)
         mensualite = self._compute_payment(montant, taux / 12, duree)
+        
+        # Coût total
         cout_total = mensualite * duree - montant
-
-        assurance_mensuelle = 0.0
+        
+        # Assurance (obligatoire si durée > 60 mois)
+        assurance_mensuelle = 0
         if duree > self.grid['assurance']['obligatoire_si_duree']:
             assurance_mensuelle = montant * self.grid['assurance']['taux_mensuel']
-
+        
+        # TEG approximatif (inclut frais de dossier)
         frais = self.grid['frais_dossier_forfait']
         teg = self._compute_teg(montant, mensualite + assurance_mensuelle, duree, frais)
-
+        
+        # Argument selon type
         arguments = {
-            'PRINCIPALE': "Offre recommandée — équilibre optimal entre mensualité et coût",
-            'CONFORT': "Mensualité allégée pour préserver votre budget",
-            'ECONOMIE': "Meilleur coût total — remboursement rapide",
+            'PRINCIPALE': 'Offre recommandée — équilibre optimal entre mensualité et coût',
+            'CONFORT': 'Mensualité allégée pour préserver votre budget',
+            'ECONOMIE': 'Meilleur coût total — remboursement rapide',
         }
-
+        
         return {
             'type': type_offre,
             'montant': int(montant),
@@ -112,46 +137,57 @@ class CommercialExpert:
             'frais_dossier': frais,
             'argument': arguments[type_offre],
         }
-
+    
     def _compute_rate(self, note, duree, segment, profile):
+        """Calcule le taux final avec majorations et bonifications."""
         taux = self.grid['taux_base'][note]
         maj = self.grid['majorations']
-
+        
+        # Majorations durée
         if 60 < duree <= 72:
             taux += maj['duree_60_72']
         elif duree > 72:
             taux += maj['duree_60_72'] + maj['duree_sup_72']
-
+        
+        # Bonifications segment
         if segment == 'PREMIUM':
             taux += maj['segment_premium']
         elif segment == 'PRIVE':
             taux += maj['segment_prive']
-
+        
+        # Client fidèle (a un crédit immo)
         if profile['raw_features'].get('mensualite_immo', 0) > 0:
             taux += maj['client_fidele']
-
+        
+        # Tendance négative = majoration
         if profile['comportement']['tendance_compte'] < -20:
             taux += maj['tendance_negative']
-
+        
+        # Note A avec profil très sain = bonification
         if note == 'A' and profile['solvabilite']['ratio_epargne'] > 3:
             taux += maj['profil_tres_sain']
-
+        
+        # Bornage
         taux = max(self.grid['taux_plancher'], min(self.grid['taux_plafond'], taux))
+        
         return taux
-
+    
     def _compute_payment(self, P, r, n):
+        """Mensualité = P × r / (1 - (1+r)^-n)."""
         if r == 0:
             return P / n
         return P * r / (1 - (1 + r) ** -n)
-
+    
     def _pv_from_payment(self, pmt, r, n):
-        if r == 0 or pmt <= 0:
-            return 0.0
+        """Valeur actuelle = PMT × (1 - (1+r)^-n) / r."""
+        if r == 0:
+            return pmt * n
         return pmt * (1 - (1 + r) ** -n) / r
-
+    
     def _compute_teg(self, montant, mensualite, duree, frais):
-        if montant <= 0:
-            return 0.0
+        """TEG approximatif incluant frais de dossier."""
         total_paye = mensualite * duree + frais
         cout = total_paye - montant
-        return (cout / montant) * (12 / duree) * 1.1
+        # Taux annuel équivalent approximatif
+        return (cout / montant) * (12 / duree) * 1.1  # Approximation
+

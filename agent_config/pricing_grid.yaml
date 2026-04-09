@@ -2,39 +2,48 @@
 # Grille tarifaire AWB — Crédit Conso
 # ═══════════════════════════════════════════════════════════
 
+# Plafonds par note
 plafonds:
   A: {montant_max: 500000, duree_max: 84}
   B: {montant_max: 300000, duree_max: 72}
   C: {montant_max: 150000, duree_max: 60}
   D: {montant_max: 80000,  duree_max: 48}
 
+# Multiplicateurs selon segment commercial
 multiplicateurs_segment:
   MASS: 8
   PREMIUM: 12
   PRIVE: 15
 
+# Règle de capacité (mensualité max = revenu × ratio)
 ratio_mensualite_max: 0.40
 
+# Taux de base par note (pour durée 60 mois, segment MASS)
 taux_base:
   A: 0.055
   B: 0.069
   C: 0.084
   D: 0.102
 
+# Majorations
 majorations:
   duree_60_72: 0.005
   duree_sup_72: 0.010
   tendance_negative: 0.003
   segment_premium: -0.003
   segment_prive: -0.006
-  client_fidele: -0.002
-  profil_tres_sain: -0.004
+  client_fidele: -0.002  # a déjà un crédit immo AWB
+  profil_tres_sain: -0.004  # note A + ratio_epargne > 3
 
+# Bornes absolues
 taux_plancher: 0.045
 taux_plafond: 0.120
 
-frais_dossier_forfait: 500
+# Frais de dossier (pour le calcul du TEG)
+frais_dossier_forfait: 500  # MAD
 
+# Assurance décès-invalidité
 assurance:
-  taux_mensuel: 0.0008
-  obligatoire_si_duree: 60
+  taux_mensuel: 0.0008  # 0.08% du capital restant dû
+  obligatoire_si_duree: 60  # obligatoire au-delà de 60 mois
+

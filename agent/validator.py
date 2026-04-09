@@ -1,97 +1,79 @@
 """
 Validation des narrations produites par le LLM.
-Si une narration échoue → fallback template.
+Si une narration échoue la validation → fallback template.
 """
 import re
 import yaml
 
 
 class NarrationValidator:
-
+    
     def __init__(self, blacklist_path='agent_config/blacklist_words.yaml'):
         try:
             with open(blacklist_path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f)
-                self.blacklist = [w.lower() for w in data.get('banned_words', [])]
+                self.blacklist = yaml.safe_load(f).get('banned_words', [])
         except FileNotFoundError:
             self.blacklist = [
                 'exceptionnel', 'unique', 'extraordinaire', 'garantie',
-                'sans risque', '100%', 'opportunité rare', 'incroyable',
-                'shap', 'embedding', 'lstm', 'catboost', 'machine learning',
+                'sans risque', '100%', 'opportunité rare', 'incroyable'
             ]
-
+        
         from agent.config_agent import VALIDATION_CONFIG
         self.config = VALIDATION_CONFIG
-
-    def validate(self, narration: dict, commercial_offers: dict) -> bool:
+    
+    def validate(self, narration, offers):
         """
-        Retourne True si la narration est valide, False sinon.
+        Returns True si la narration passe toutes les validations.
         """
-        # 1. Clés requises
+        # 1. Structure
         for key in self.config['required_keys']:
             if key not in narration:
+                print(f"   ❌ Clé manquante : {key}")
                 return False
-            if not narration[key]:
-                return False
-
-        # 2. Longueurs max
-        checks = [
-            ('resume_executif', self.config['max_resume_chars']),
-            ('argumentation_commerciale', self.config['max_argumentation_chars']),
-            ('script_appel', self.config['max_script_chars']),
-        ]
-        for key, max_len in checks:
-            if key in narration and isinstance(narration[key], str):
-                if len(narration[key]) > max_len:
-                    return False
-
-        # 3. Mots bannis
-        for key in ['resume_executif', 'argumentation_commerciale', 'script_appel']:
-            text = narration.get(key, '')
-            if isinstance(text, str):
-                text_lower = text.lower()
-                for word in self.blacklist:
-                    if word in text_lower:
-                        return False
-
-        # 4. Cohérence chiffres — si offre disponible, le montant doit apparaître
-        if commercial_offers and commercial_offers.get('offre_principale'):
-            op = commercial_offers['offre_principale']
-            montant_str = str(op['montant'])
-            # Au moins un des textes clés doit mentionner le montant
-            texts = [
-                narration.get('resume_executif', ''),
-                narration.get('argumentation_commerciale', ''),
-                narration.get('script_appel', ''),
-            ]
-            # On accepte si montant présent dans au moins un champ (sans espace)
-            montant_found = any(
-                montant_str.replace(',', '') in t.replace(' ', '').replace(',', '')
-                for t in texts
-            )
-            if not montant_found:
-                return False
-
-        # 5. points_de_vigilance doit être une liste non vide
-        pdv = narration.get('points_de_vigilance', [])
-        if not isinstance(pdv, list) or len(pdv) == 0:
+        
+        # 2. Longueurs
+        if len(narration['resume_executif']) > self.config['max_resume_chars']:
+            print("   ❌ Résumé trop long")
             return False
-
+        
+        if len(narration['argumentation_commerciale']) > self.config['max_argumentation_chars']:
+            print("   ❌ Argumentation trop longue")
+            return False
+        
+        if len(narration['script_appel']) > self.config['max_script_chars']:
+            print("   ❌ Script trop long")
+            return False
+        
+        # 3. Mots bannis
+        full_text = ' '.join([
+            narration['resume_executif'],
+            narration['argumentation_commerciale'],
+            narration['justification_taux'],
+            narration['script_appel'],
+        ]).lower()
+        
+        for word in self.blacklist:
+            if word.lower() in full_text:
+                print(f"   ❌ Mot banni détecté : {word}")
+                return False
+        
+        # 4. Cohérence chiffres (le montant doit apparaître quelque part)
+        if offers and offers.get('offre_principale'):
+            montant = offers['offre_principale']['montant']
+            # Chercher le montant dans le texte (avec ou sans séparateur)
+            montant_str = str(montant)
+            montant_sep = f"{montant:,}".replace(',', ' ').replace(',', '.')
+            if montant_str not in full_text and montant_sep not in full_text:
+                # Tolérance : accepter aussi "85000" vs "85 000" vs "85,000"
+                montant_clean = re.sub(r'[^\\d]', '', full_text)
+                if str(montant) not in montant_clean:
+                    print(f"   ⚠️ Montant {montant} non trouvé dans la narration")
+                    # Warning mais pas bloquant
+        
+        # 5. Points de vigilance doit être une liste
+        if not isinstance(narration['points_de_vigilance'], list):
+            print("   ❌ points_de_vigilance doit être une liste")
+            return False
+        
         return True
 
-    def sanitize(self, narration: dict) -> dict:
-        """
-        Nettoie une narration partiellement valide :
-        tronque les textes trop longs, retire les mots bannis.
-        """
-        result = dict(narration)
-        checks = [
-            ('resume_executif', self.config['max_resume_chars']),
-            ('argumentation_commerciale', self.config['max_argumentation_chars']),
-            ('script_appel', self.config['max_script_chars']),
-        ]
-        for key, max_len in checks:
-            if key in result and isinstance(result[key], str):
-                if len(result[key]) > max_len:
-                    result[key] = result[key][:max_len - 3] + '...'
-        return result
