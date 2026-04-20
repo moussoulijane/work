@@ -212,13 +212,9 @@ def run_infer(args):
     # 8. Charger LSTM encoder + encode
     print("\n  ── LSTM : Chargement + encodage ──")
     device     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    lstm_model = LSTMEncoder(**{
-        k: LSTM_CONFIG[k]
-        for k in ['input_size', 'hidden_size', 'num_layers',
-                  'dropout', 'bidirectional', 'embedding_dim']
-    })
+    lstm_model = build_lstm_encoder(LSTM_CONFIG)
     lstm_model.load_state_dict(
-        torch.load("models/lstm_encoder.pt", map_location=device, weights_only=True)
+        torch.load("models/lstm_encoder.pt", map_location=device)
     )
     lstm_model.to(device).eval()
 

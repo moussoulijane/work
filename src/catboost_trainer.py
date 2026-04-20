@@ -283,7 +283,8 @@ class CatBoostTrainer:
 
             X = _prepare_X(df_seg, self.feature_cols, self.cat_features)
 
-            if use_two_stage:
+            _use_two_stage = use_two_stage  # copie locale pour ne pas contaminer l'itération suivante
+            if _use_two_stage:
                 s1_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}_s1.cbm")
                 s2_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}_s2.cbm")
                 th_path = os.path.join(model_dir, f"s1_threshold_{name.lower()}.pkl")
@@ -298,9 +299,9 @@ class CatBoostTrainer:
                         probas[mask] = m_s2.predict_proba(X[mask])[:, 1]
                 else:
                     logger.warning(f"Modèles two-stage absents pour {name} — fallback standard")
-                    use_two_stage = False
+                    _use_two_stage = False
 
-            if not use_two_stage:
+            if not _use_two_stage:
                 cbm_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}.cbm")
                 if not os.path.exists(cbm_path):
                     raise FileNotFoundError(
@@ -312,7 +313,7 @@ class CatBoostTrainer:
 
             # Calibration
             if use_calibration:
-                suffix   = "_s2" if use_two_stage else ""
+                suffix   = "_s2" if _use_two_stage else ""
                 cal_path = os.path.join(model_dir, f"calibrator_{name.lower()}{suffix}.pkl")
                 if os.path.exists(cal_path):
                     cal    = ProbabilityCalibrator.load(cal_path)
