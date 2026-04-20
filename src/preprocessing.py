@@ -36,10 +36,14 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         median_rev = df['revenu_principal'].median()
         df['revenu_principal'] = df['revenu_principal'].fillna(median_rev)
 
-    # 3. Séquences : fillna(0) = solde nul
+    # 3. Séquences : fillna(0) = solde nul ; supprimer les colonnes hors référentiel
     jour_present = [c for c in JOUR_COLS if c in df.columns]
     if jour_present:
         df[jour_present] = df[jour_present].fillna(0)
+    extra_jour = [c for c in df.columns if c.startswith('jour_') and c not in JOUR_COLS]
+    if extra_jour:
+        df = df.drop(columns=extra_jour)
+        logger.warning(f"Colonnes jour_* hors référentiel supprimées : {extra_jour}")
 
     # 4. Features dérivées
     if 'total_mensualite_actif' in df.columns and 'mensualite_immo' in df.columns:
