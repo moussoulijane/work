@@ -1,9 +1,11 @@
 """
 Preprocessing : nettoyage, imputation, encodage.
 """
+import re
 import pandas as pd
 import numpy as np
 import logging
+from src.jour_utils import get_jour_cols as _get_jour_cols
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,17 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         median_rev = df['revenu_principal'].median()
         df['revenu_principal'] = df['revenu_principal'].fillna(median_rev)
 
-    # 3. Séquences : fillna(0) = solde nul ; supprimer les colonnes hors référentiel
+    # 3. Séquences : normaliser noms date→numérique si besoin, fillna(0), supprimer hors référentiel
+    _all_jour = _get_jour_cols(df)
+    if _all_jour and not re.match(r'^jour_\d+$', _all_jour[0]):
+        # Format date (ex: jour_2024_10_01) → renommer en jour_1, jour_2, ...
+        _n = len(JOUR_COLS)
+        _extra = _all_jour[_n:]
+        if _extra:
+            df = df.drop(columns=_extra)
+            logger.warning(f"{len(_extra)} colonnes jour_* excédentaires supprimées")
+        df = df.rename(columns={col: f'jour_{i+1}' for i, col in enumerate(_all_jour[:_n])})
+        logger.info(f"Colonnes jour_* renommées au format numérique ({min(len(_all_jour), _n)} colonnes)")
     jour_present = [c for c in JOUR_COLS if c in df.columns]
     if jour_present:
         df[jour_present] = df[jour_present].fillna(0)
