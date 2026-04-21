@@ -47,25 +47,42 @@ TEMPORAL_FEATURE_COLS = [
     'solde_debut_periode', 'solde_fin_periode', 'ratio_fin_vs_debut',
 ]
 
-# 11 statiques + 9 stats + 6 avancées + 14 temporelles = 40 features
-FEATURE_COLS = STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS + TEMPORAL_FEATURE_COLS
+APPETITE_SIGNAL_COLS = [
+    'simul_recent_flag',        # a simulé le mois dernier (0/1)
+    'simul_croissant',          # simulation_n1 / simulation_total
+    'simul_x_capacite',         # count_simul × capacite_credit_supp (veut ET peut)
+    'solde_bon_et_simule',      # pct_jours_positifs × count_simul
+    'amplitude_solde',          # solde_max - solde_min
+    'solde_min_m1',             # creux mois 1
+    'solde_min_m2',             # creux mois 2
+    'solde_min_m3',             # creux mois 3
+    'is_stable_last_month',     # aucun jour négatif au 3ème mois
+    'ratio_endettement_vs_cap', # taux_endettement / capacite_résiduelle
+]
+
+# 11 statiques + 9 stats + 6 avancées + 14 temporelles + 10 signaux = 50 features
+FEATURE_COLS = (STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS
+                + TEMPORAL_FEATURE_COLS + APPETITE_SIGNAL_COLS)
 
 # Conservé pour compatibilité avec les anciens artefacts LSTM
 LSTM_EMBEDDING_COLS = []
 LSTM_CONFIG = {}
 
 MODEL_PARAMS = {
-    'iterations':           1000,
-    'learning_rate':        0.05,
-    'depth':                6,
-    'loss_function':        'Logloss',
-    'eval_metric':          'AUC',
-    'random_seed':          42,
-    'verbose':              100,
-    'early_stopping_rounds': 50,
-    'task_type':            'CPU',
-    'bootstrap_type':       'Bernoulli',
-    'subsample':            0.8,
+    'iterations':            2000,
+    'learning_rate':         0.03,   # LR plus faible → plus d'arbres, meilleure généralisation
+    'depth':                 7,
+    'l2_leaf_reg':           5,      # régularisation L2 (réduit l'overfitting)
+    'min_data_in_leaf':      30,     # feuilles plus grandes (robustesse sur classes rares)
+    'loss_function':         'Logloss',
+    'eval_metric':           'AUC',
+    'random_seed':           42,
+    'verbose':               200,
+    'early_stopping_rounds': 100,
+    'task_type':             'CPU',
+    'bootstrap_type':        'Bernoulli',
+    'subsample':             0.8,
+    'colsample_bylevel':     0.7,    # sous-échantillonnage des features par nœud
 }
 
 SHAP_CONFIG = {
@@ -116,4 +133,15 @@ FEATURE_LABELS = {
     'solde_debut_periode':        'Solde moyen début de période',
     'solde_fin_periode':          'Solde moyen fin de période',
     'ratio_fin_vs_debut':         'Ratio fin / début de période',
+    # Signaux d'appétence
+    'simul_recent_flag':          'A simulé le mois dernier',
+    'simul_croissant':            'Accélération des simulations',
+    'simul_x_capacite':           'Simulations × capacité crédit',
+    'solde_bon_et_simule':        'Solde sain ET simulation',
+    'amplitude_solde':            'Amplitude du solde (max - min)',
+    'solde_min_m1':               'Creux de solde mois 1',
+    'solde_min_m2':               'Creux de solde mois 2',
+    'solde_min_m3':               'Creux de solde mois 3',
+    'is_stable_last_month':       'Aucun découvert dernier mois',
+    'ratio_endettement_vs_cap':   'Ratio endettement / capacité résiduelle',
 }

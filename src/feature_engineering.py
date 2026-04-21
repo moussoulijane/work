@@ -3,6 +3,7 @@ Feature engineering :
   - 9 statistiques de solde sur 91 jours
   - 6 features avancées métier (intention, capacité, fragilité)
   - 14 features temporelles (remplacent les embeddings LSTM)
+  - 10 signaux d'appétence crédit (interactions + minima mensuels)
 """
 import pandas as pd
 import numpy as np
@@ -204,4 +205,73 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     logger.info(f"Temporal features ajoutées → {len(df):,} lignes, {len(_COLS)} features")
+    return df
+
+
+def add_appetite_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    10 signaux d'appétence crédit conso à fort pouvoir discriminant :
+
+    - simul_recent_flag           : a simulé le mois dernier (0/1)
+    - simul_x_capacite            : count_simul × capacité_crédit (veut ET peut)
+    - solde_bon_et_simule         : pct_jours_positifs × count_simul
+    - amplitude_solde             : solde_max - solde_min (range absolu)
+    - solde_min_m1/m2/m3          : creux mensuel (stress par période)
+    - is_stable_last_month        : aucun jour négatif au 3ème mois (0/1)
+    - ratio_endettement_vs_cap    : taux_endettement / (capacite_supp/kMAD + ε)
+    - simul_croissant             : accélération des simulations (n1 > moyenne passée)
+
+    IMPORTANT : appeler après add_balance_features(), add_advanced_features()
+    et add_temporal_features() (utilise solde_max, solde_min, pct_jours_positifs,
+    capacite_credit_supp, taux_endettement).
+    """
+    df = df.copy()
+
+    # ── Signal d'intention immédiate ──
+    simul    = df['count_simul'].clip(lower=0)          if 'count_simul'            in df.columns else pd.Series(0, index=df.index)
+    simul_n1 = df['count_simul_mois_n_1'].clip(lower=0) if 'count_simul_mois_n_1'  in df.columns else pd.Series(0, index=df.index)
+
+    df['simul_recent_flag'] = (simul_n1 > 0).astype(np.float32)
+
+    # Accélération des simulations : n1 représente plus de la moitié du total
+    df['simul_croissant'] = np.where(
+        simul > 0, (simul_n1 / simul).clip(0, 1), 0.0
+    ).astype(np.float32)
+
+    # ── Interaction : veut ET peut ──
+    cap = df['capacite_credit_supp'] if 'capacite_credit_supp' in df.columns else pd.Series(0, index=df.index)
+    df['simul_x_capacite'] = (simul * (cap / 1000.0 + 1.0)).astype(np.float32)
+
+    pct_pos = df['pct_jours_positifs'] if 'pct_jours_positifs' in df.columns else pd.Series(0, index=df.index)
+    df['solde_bon_et_simule'] = (pct_pos * simul).astype(np.float32)
+
+    # ── Amplitude absolue du solde ──
+    if 'solde_max' in df.columns and 'solde_min' in df.columns:
+        df['amplitude_solde'] = (df['solde_max'] - df['solde_min']).astype(np.float32)
+    else:
+        df['amplitude_solde'] = 0.0
+
+    # ── Minima mensuels et stabilité récente ──
+    jour_present = get_jour_cols(df)
+    if jour_present and len(jour_present) >= 6:
+        balances = to_float_array(df, jour_present)
+        N = balances.shape[1]
+        m = N // 3
+        df['solde_min_m1'] = balances[:, :m].min(axis=1)
+        df['solde_min_m2'] = balances[:, m:2 * m].min(axis=1)
+        df['solde_min_m3'] = balances[:, 2 * m:].min(axis=1)
+        df['is_stable_last_month'] = (balances[:, 2 * m:].min(axis=1) >= 0).astype(np.float32)
+    else:
+        for col in ['solde_min_m1', 'solde_min_m2', 'solde_min_m3', 'is_stable_last_month']:
+            df[col] = 0.0
+
+    # ── Ratio endettement / capacité résiduelle ──
+    if 'taux_endettement' in df.columns:
+        df['ratio_endettement_vs_cap'] = (
+            df['taux_endettement'] / (cap / 1000.0 + 0.01)
+        ).astype(np.float32)
+    else:
+        df['ratio_endettement_vs_cap'] = 0.0
+
+    logger.info(f"Appetite signals ajoutés → {len(df):,} lignes")
     return df

@@ -57,23 +57,17 @@ class CatBoostTrainer:
 
     def split_data(self, df: pd.DataFrame, mode: str = 'train'):
         """
-        mode='train' : ASYMÉTRIQUE — positifs présents dans LOW et HIGH.
-        mode='infer' : SIMPLE — filtre par revenu uniquement.
+        mode='train' : chaque modèle entraîné sur son segment uniquement.
+                       Évite la contamination inter-segments (covariate shift).
+                       scale_pos_weight gère le déséquilibre au sein de chaque segment.
+        mode='infer' : filtre par revenu uniquement.
         """
         if mode == 'train':
             assert 'target' in df.columns, "Mode train requiert la colonne 'target'"
-            df_pos      = df[df['target'] == 1]
-            df_neg_low  = df[(df['target'] == 0) & (df['revenu_principal'] <= self.threshold)]
-            df_neg_high = df[(df['target'] == 0) & (df['revenu_principal'] >  self.threshold)]
-            return (
-                pd.concat([df_pos, df_neg_low],  ignore_index=True),
-                pd.concat([df_pos, df_neg_high], ignore_index=True),
-            )
-        else:
-            return (
-                df[df['revenu_principal'] <= self.threshold].copy(),
-                df[df['revenu_principal'] >  self.threshold].copy(),
-            )
+        return (
+            df[df['revenu_principal'] <= self.threshold].copy(),
+            df[df['revenu_principal'] >  self.threshold].copy(),
+        )
 
     # ─────────────────────────────────────────────────────────
     # Train standard

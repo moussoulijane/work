@@ -31,7 +31,10 @@ from config import (
 )
 from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
-from src.feature_engineering import add_balance_features, add_advanced_features, add_temporal_features
+from src.feature_engineering import (
+    add_balance_features, add_advanced_features,
+    add_temporal_features, add_appetite_signals,
+)
 from src.catboost_trainer import CatBoostTrainer
 from src.calibration import ProbabilityCalibrator
 from src.metrics import ModelEvaluator
@@ -71,6 +74,7 @@ def build_base(files: list[str], cache_path: str, force_rebuild: bool) -> pd.Dat
     df = add_balance_features(df)
     df = add_advanced_features(df)
     df = add_temporal_features(df)   # 14 features temporelles (remplace LSTM)
+    df = add_appetite_signals(df)    # 10 signaux d'appétence (interactions + minima)
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     df.to_parquet(cache_path, index=False)
     print(f"  Base sauvegardée → {cache_path}")
