@@ -70,6 +70,51 @@ class CatBoostTrainer:
         )
 
     # ─────────────────────────────────────────────────────────
+    # SMOTE (sur features numériques uniquement)
+    # ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_smote(X: pd.DataFrame, y: pd.Series, cat_idx: list,
+                     target_ratio: float = 0.10) -> tuple:
+        """
+        SMOTE sur les features numériques uniquement.
+        Les features catégorielles sont copiées depuis le voisin le plus proche.
+        target_ratio : ratio positifs / total visé (0.10 = 10%)
+        """
+        try:
+            from imblearn.over_sampling import SMOTENC
+        except ImportError:
+            logger.warning("imbalanced-learn absent — SMOTE ignoré (pip install imbalanced-learn)")
+            return X, y
+
+        n_pos   = int((y == 1).sum())
+        n_total = len(y)
+        n_pos_target = int(n_total * target_ratio)
+
+        if n_pos >= n_pos_target:
+            return X, y   # déjà suffisamment de positifs
+
+        k_neighbors = min(5, n_pos - 1)
+        if k_neighbors < 1:
+            return X, y
+
+        try:
+            smote = SMOTENC(
+                categorical_features=cat_idx,
+                sampling_strategy={1: n_pos_target},
+                k_neighbors=k_neighbors,
+                random_state=42,
+            )
+            X_res, y_res = smote.fit_resample(X, y)
+            n_syn = int((y_res == 1).sum()) - n_pos
+            logger.info(f"SMOTE : {n_syn:,} exemples positifs synthétiques générés "
+                        f"({n_pos} → {int((y_res==1).sum())})")
+            return pd.DataFrame(X_res, columns=X.columns), pd.Series(y_res)
+        except Exception as e:
+            logger.warning(f"SMOTE échoué ({e}) — entraînement sans oversampling")
+            return X, y
+
+    # ─────────────────────────────────────────────────────────
     # Train standard
     # ─────────────────────────────────────────────────────────
 
@@ -104,10 +149,13 @@ class CatBoostTrainer:
             n_neg = int((y_tr == 0).sum())
             spw   = n_neg / n_pos
             print(f"  train={len(y_tr):,}  eval={len(y_te):,}  "
-                  f"positifs={n_pos}  scale_pos_weight={spw:.1f}")
+                  f"positifs={n_pos}  ratio={n_neg/n_pos:.0f}:1")
+
+            # SMOTE sur les features numériques (oversample les positifs ×5 max)
+            X_tr_fit, y_tr_fit = self._apply_smote(X_tr, y_tr, cat_idx)
 
             model = CatBoostClassifier(**{**self.model_params, 'scale_pos_weight': spw})
-            model.fit(X_tr, y_tr, cat_features=cat_idx, eval_set=(X_te, y_te))
+            model.fit(X_tr_fit, y_tr_fit, cat_features=cat_idx, eval_set=(X_te, y_te))
 
             y_proba = model.predict_proba(X_te)[:, 1]
             auc     = roc_auc_score(y_te, y_proba)

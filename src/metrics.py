@@ -74,7 +74,7 @@ class ModelEvaluator:
 
         # Affichage
         print(f"\n{'═'*57}")
-        print(f"  ÉVALUATION : {model_name}  (seuil={threshold})")
+        print(f"  ÉVALUATION : {model_name}  (seuil={threshold:.4f})")
         print(f"{'═'*57}")
         for k in ['auc_roc', 'gini', 'ks_statistic', 'average_precision',
                   'brier_score', 'f1', 'f2', 'precision', 'recall', 'specificity']:
@@ -82,6 +82,13 @@ class ModelEvaluator:
         print(f"  {'─'*55}")
         print(f"  TP={tp:,}  FP={fp:,}  FN={fn:,}  TN={tn:,}")
         print(f"{'═'*57}")
+
+        # Tableau de lift décile — métrique clé pour les campagnes bancaires
+        df_lift = self._compute_lift_table(y_true, y_proba)
+        self._print_lift_table(df_lift)
+        df_lift.to_csv(
+            os.path.join(self.output_dir, f"{model_name}_lift.csv"), index=False
+        )
 
         # Plots
         self._plot_roc(y_true, y_proba, model_name)
@@ -96,6 +103,57 @@ class ModelEvaluator:
         )
 
         return metrics
+
+    # ─────────────────────────────────────────────────────────
+    # Lift décile
+    # ─────────────────────────────────────────────────────────
+
+    def _compute_lift_table(self, y_true: np.ndarray, y_proba: np.ndarray,
+                            n_deciles: int = 10) -> pd.DataFrame:
+        """
+        Tableau de lift par décile (triés par score décroissant).
+        Métrique standard pour les modèles de ciblage en banque.
+        """
+        df = pd.DataFrame({'y_true': y_true, 'y_proba': y_proba})
+        df = df.sort_values('y_proba', ascending=False).reset_index(drop=True)
+        n        = len(df)
+        n_pos    = int(df['y_true'].sum())
+        baseline = n_pos / n  # prévalence globale
+
+        records = []
+        for d in range(1, n_deciles + 1):
+            pct_pop   = d / n_deciles
+            idx_end   = int(np.ceil(n * pct_pop))
+            subset    = df.iloc[:idx_end]
+            n_sub     = len(subset)
+            tp_sub    = int(subset['y_true'].sum())
+            precision = tp_sub / n_sub if n_sub > 0 else 0.0
+            recall    = tp_sub / n_pos if n_pos > 0 else 0.0
+            lift      = precision / baseline if baseline > 0 else 0.0
+            records.append({
+                'decile':         d,
+                'pct_contacts':   f"{pct_pop:.0%}",
+                'n_contacts':     n_sub,
+                'n_positifs':     tp_sub,
+                'pct_positifs_captures': f"{recall:.1%}",
+                'precision':      f"{precision:.1%}",
+                'lift':           round(lift, 2),
+            })
+        return pd.DataFrame(records)
+
+    def _print_lift_table(self, df_lift: pd.DataFrame):
+        print(f"\n  {'─'*72}")
+        print(f"  LIFT DÉCILE  (triés par score décroissant)")
+        print(f"  {'─'*72}")
+        print(f"  {'Décile':>6}  {'% contactés':>11}  {'N contacts':>10}  "
+              f"{'Positifs':>8}  {'% capturés':>10}  {'Précision':>9}  {'Lift':>5}")
+        print(f"  {'─'*72}")
+        for _, r in df_lift.iterrows():
+            print(f"  {int(r['decile']):>6}  {r['pct_contacts']:>11}  "
+                  f"{int(r['n_contacts']):>10,}  {int(r['n_positifs']):>8,}  "
+                  f"{r['pct_positifs_captures']:>10}  {r['precision']:>9}  "
+                  f"{r['lift']:>5.1f}×")
+        print(f"  {'─'*72}")
 
     # ─────────────────────────────────────────────────────────
     # Compare

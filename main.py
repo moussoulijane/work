@@ -156,15 +156,17 @@ def run_train(args):
     )
     shap_engine.run(df, model_low_pred, model_high_pred, "outputs/shap")
 
-    # 5. Error analysis
+    # 5. Error analysis (avec seuil optimisé)
     print("\n  ── Analyse erreurs (segment LOW) ──")
     df_low_eval = df[df['revenu_principal'] <= revenu_treshold].copy()
     if len(df_low_eval) > 0 and 'target' in df_low_eval.columns:
+        t_low_f2 = saved_thresholds.get('LOW', {}).get('f2', 0.5)
         analyzer = ErrorAnalyzer()
         analyzer.analyze(
             df_low_eval,
             results_low['y_true'],
             results_low['y_proba'],
+            threshold=t_low_f2,
             output_dir="outputs/metrics",
         )
 
