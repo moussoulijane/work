@@ -40,24 +40,19 @@ ADVANCED_FEATURE_COLS = [
 
 CAT_FEATURES = ['type_revenu', 'segment']
 
-LSTM_CONFIG = {
-    'input_size':    1,
-    'hidden_size':   64,
-    'num_layers':    2,
-    'dropout':       0.2,
-    'bidirectional': False,
-    'embedding_dim': 32,
-    'sequence_length': 91,
-    'batch_size':    256,
-    'learning_rate': 0.001,
-    'epochs':        50,
-    'patience':      10,
-    'use_attention': False,  # True → LSTMEncoderWithAttention
-}
+TEMPORAL_FEATURE_COLS = [
+    'solde_moy_m1', 'solde_moy_m2', 'solde_moy_m3', 'ratio_solde_recent',
+    'solde_p10', 'solde_p25', 'solde_p75', 'solde_p90',
+    'max_consecutif_negatif', 'nb_zero_crossings', 'pct_jours_positifs',
+    'solde_debut_periode', 'solde_fin_periode', 'ratio_fin_vs_debut',
+]
 
-LSTM_EMBEDDING_COLS = [f'lstm_emb_{i}' for i in range(32)]
-# 11 statiques + 9 stats + 6 avancées + 32 LSTM = 58 features
-FEATURE_COLS = STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS + LSTM_EMBEDDING_COLS
+# 11 statiques + 9 stats + 6 avancées + 14 temporelles = 40 features
+FEATURE_COLS = STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS + TEMPORAL_FEATURE_COLS
+
+# Conservé pour compatibilité avec les anciens artefacts LSTM
+LSTM_EMBEDDING_COLS = []
+LSTM_CONFIG = {}
 
 MODEL_PARAMS = {
     'iterations':           1000,
@@ -106,5 +101,19 @@ FEATURE_LABELS = {
     'ratio_simul_recents':         'Ratio simulations récentes',
     'score_fragilite':             'Score de fragilité financière',
     'solde_acceleration':          'Accélération du solde',
-    'lstm_embedding':              'Profil temporel du compte (LSTM)',
+    # Features temporelles
+    'solde_moy_m1':               'Solde moyen mois 1',
+    'solde_moy_m2':               'Solde moyen mois 2',
+    'solde_moy_m3':               'Solde moyen mois 3',
+    'ratio_solde_recent':         'Ratio solde récent / historique',
+    'solde_p10':                  'Solde percentile 10',
+    'solde_p25':                  'Solde percentile 25',
+    'solde_p75':                  'Solde percentile 75',
+    'solde_p90':                  'Solde percentile 90',
+    'max_consecutif_negatif':     'Max jours consécutifs en découvert',
+    'nb_zero_crossings':          'Passages par zéro du solde',
+    'pct_jours_positifs':         '% jours avec solde positif',
+    'solde_debut_periode':        'Solde moyen début de période',
+    'solde_fin_periode':          'Solde moyen fin de période',
+    'ratio_fin_vs_debut':         'Ratio fin / début de période',
 }

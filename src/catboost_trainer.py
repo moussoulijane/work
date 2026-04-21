@@ -270,8 +270,21 @@ class CatBoostTrainer:
         use_two_stage    : utilise les modèles _s1/_s2 si disponibles
         use_calibration  : applique la calibration isotonique si disponible
         """
+        import json
         import joblib
         from src.calibration import ProbabilityCalibrator
+
+        # Chargement des seuils optimisés (issus du train)
+        thresholds_data = {}
+        thresholds_path = os.path.join(model_dir, 'thresholds.json')
+        if os.path.exists(thresholds_path):
+            with open(thresholds_path) as f:
+                thresholds_data = json.load(f)
+            logger.info(f"Seuils optimisés chargés → {thresholds_path}")
+        else:
+            logger.warning(
+                "thresholds.json absent — seuil 0.5 utilisé (relancer python main.py train)"
+            )
 
         df_low, df_high = self.split_data(df, mode='infer')
         results_dfs = []
@@ -319,16 +332,19 @@ class CatBoostTrainer:
                     cal    = ProbabilityCalibrator.load(cal_path)
                     probas = cal.transform(probas)
 
-            predictions = (probas >= 0.5).astype(int)
+            seg_thresholds = thresholds_data.get(name, {})
+            threshold = float(seg_thresholds.get('f2', 0.5))
+            predictions = (probas >= threshold).astype(int)
             out = pd.DataFrame({
                 'id_client':     df_seg['id_client'].values,
                 'segment_model': name,
                 'prediction':    predictions,
                 'proba':         probas,
+                'threshold':     threshold,
             })
             results_dfs.append(out)
             print(f"  Segment {name} : {len(out):,} prédictions  "
-                  f"| positifs prédits : {int(predictions.sum()):,}")
+                  f"| seuil F2={threshold:.3f}  positifs prédits : {int(predictions.sum()):,}")
 
         if not results_dfs:
             raise ValueError("Aucune prédiction produite — vérifier les données d'inférence")

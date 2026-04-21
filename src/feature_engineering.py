@@ -2,6 +2,7 @@
 Feature engineering :
   - 9 statistiques de solde sur 91 jours
   - 6 features avancées métier (intention, capacité, fragilité)
+  - 14 features temporelles (remplacent les embeddings LSTM)
 """
 import pandas as pd
 import numpy as np
@@ -127,4 +128,80 @@ def add_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
         df['score_fragilite'] = 0.0
 
     logger.info(f"Advanced features ajoutées → {len(df):,} lignes")
+    return df
+
+
+def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    14 features temporelles dérivées des 91 jours de solde.
+    Remplacent les 32 embeddings LSTM avec des signaux interprétables :
+
+    - solde_moy_m1/m2/m3     : moyenne mensuelle sur 3 périodes (tendance)
+    - ratio_solde_recent      : solde_moy_m3 / (|solde_moy_m1| + 1)
+    - solde_p10/p25/p75/p90  : quantiles robustes de la distribution
+    - max_consecutif_negatif  : durée max du pire découvert (fragilité)
+    - nb_zero_crossings       : nb de passages par zéro (instabilité)
+    - pct_jours_positifs      : % de jours avec solde ≥ 0
+    - solde_debut_periode     : moyenne des 5 premiers jours
+    - solde_fin_periode       : moyenne des 5 derniers jours
+    - ratio_fin_vs_debut      : direction nette sur la période
+    """
+    _COLS = [
+        'solde_moy_m1', 'solde_moy_m2', 'solde_moy_m3', 'ratio_solde_recent',
+        'solde_p10', 'solde_p25', 'solde_p75', 'solde_p90',
+        'max_consecutif_negatif', 'nb_zero_crossings', 'pct_jours_positifs',
+        'solde_debut_periode', 'solde_fin_periode', 'ratio_fin_vs_debut',
+    ]
+    df = df.copy()
+    jour_present = get_jour_cols(df)
+
+    if not jour_present or len(jour_present) < 6:
+        for col in _COLS:
+            df[col] = 0.0
+        return df
+
+    balances = to_float_array(df, jour_present)  # (n, N)
+    n, N = balances.shape
+    m = N // 3
+
+    # Moyennes par période (trend en 3 blocs)
+    df['solde_moy_m1'] = balances[:, :m].mean(axis=1)
+    df['solde_moy_m2'] = balances[:, m:2 * m].mean(axis=1)
+    df['solde_moy_m3'] = balances[:, 2 * m:].mean(axis=1)
+    df['ratio_solde_recent'] = (
+        df['solde_moy_m3'].values / (np.abs(df['solde_moy_m1'].values) + 1.0)
+    )
+
+    # Quantiles robustes (insensibles aux outliers ponctuels)
+    df['solde_p10'] = np.percentile(balances, 10, axis=1)
+    df['solde_p25'] = np.percentile(balances, 25, axis=1)
+    df['solde_p75'] = np.percentile(balances, 75, axis=1)
+    df['solde_p90'] = np.percentile(balances, 90, axis=1)
+
+    # Max streak négatif — itération sur les 91 colonnes (vectorisé par colonne)
+    negative = (balances < 0).astype(np.float32)
+    curr_run = np.zeros(n, dtype=np.float32)
+    max_run  = np.zeros(n, dtype=np.float32)
+    for t in range(N):
+        col      = negative[:, t]
+        curr_run = (curr_run + col) * col   # reset si jour positif
+        max_run  = np.maximum(max_run, curr_run)
+    df['max_consecutif_negatif'] = max_run
+
+    # Passages par zéro (signal d'instabilité / dépense impulsive)
+    products = balances[:, :-1] * balances[:, 1:]
+    df['nb_zero_crossings'] = (products < 0).sum(axis=1).astype(np.float32)
+
+    # % jours positifs (solvabilité quotidienne)
+    df['pct_jours_positifs'] = (balances >= 0).mean(axis=1)
+
+    # Début / fin de période (5 jours ≈ 1 semaine)
+    w = max(5, N // 18)
+    df['solde_debut_periode'] = balances[:, :w].mean(axis=1)
+    df['solde_fin_periode']   = balances[:, -w:].mean(axis=1)
+    df['ratio_fin_vs_debut']  = (
+        df['solde_fin_periode'].values / (np.abs(df['solde_debut_periode'].values) + 1.0)
+    )
+
+    logger.info(f"Temporal features ajoutées → {len(df):,} lignes, {len(_COLS)} features")
     return df

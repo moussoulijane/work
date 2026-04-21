@@ -14,7 +14,6 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
-import torch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,17 +22,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import json
+
 from config import (
-    TRAIN_FILES, INFER_FILES, LSTM_CONFIG, FEATURE_COLS, CAT_FEATURES,
+    TRAIN_FILES, INFER_FILES, FEATURE_COLS, CAT_FEATURES,
     MODEL_PARAMS, SHAP_CONFIG, LSTM_EMBEDDING_COLS, FEATURE_LABELS,
     revenu_treshold,
 )
 from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
-from src.feature_engineering import add_balance_features, add_advanced_features
-from src.sequence_builder import SequenceBuilder
-from src.lstm_model import build_lstm_encoder, LSTMEncoder, LSTMTrainer
-from src.feature_merger import FeatureMerger
+from src.feature_engineering import add_balance_features, add_advanced_features, add_temporal_features
 from src.catboost_trainer import CatBoostTrainer
 from src.calibration import ProbabilityCalibrator
 from src.metrics import ModelEvaluator
@@ -47,10 +45,9 @@ from src.error_analysis import ErrorAnalyzer
 # ─────────────────────────────────────────────────────────
 
 REQUIRED_ARTIFACTS = [
-    "models/lstm_scaler.pkl",
-    "models/lstm_encoder.pt",
     f"models/{revenu_treshold}_catboost_low.cbm",
     f"models/{revenu_treshold}_catboost_high.cbm",
+    "models/thresholds.json",
 ]
 
 
@@ -72,7 +69,8 @@ def build_base(files: list[str], cache_path: str, force_rebuild: bool) -> pd.Dat
     df = merge_common(df)
     df = preprocess(df)
     df = add_balance_features(df)
-    df = add_advanced_features(df)   # 6 features avancées
+    df = add_advanced_features(df)
+    df = add_temporal_features(df)   # 14 features temporelles (remplace LSTM)
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     df.to_parquet(cache_path, index=False)
     print(f"  Base sauvegardée → {cache_path}")
@@ -88,90 +86,75 @@ def run_train(args):
     print("  MODE TRAIN")
     print("═" * 60)
 
-    # 1-4. Données
+    # 1. Données
     df = build_base(TRAIN_FILES, "data/processed/modeling_base.parquet", args.force_rebuild)
     assert 'target' in df.columns, "Colonne 'target' absente — vérifier les CSV train"
-    print(f"  Base : {len(df):,} clients  |  positifs : {int(df['target'].sum()):,}")
+    n_pos = int(df['target'].sum())
+    print(f"  Base : {len(df):,} clients  |  positifs : {n_pos:,}  "
+          f"({n_pos / len(df):.2%})")
 
-    # 5-6. SequenceBuilder.fit_transform
-    print("\n  ── LSTM : SequenceBuilder ──")
-    seq_builder        = SequenceBuilder("models/lstm_scaler.pkl")
-    sequences, seq_ids = seq_builder.fit_transform(df)
-
-    # Aligner les targets avec les ids séquencés
-    id_to_target = df.set_index('id_client')['target'].to_dict()
-    targets      = np.array([id_to_target[i] for i in seq_ids])
-
-    # 7. LSTM train (LSTMEncoderWithAttention si use_attention=True dans config)
-    print("\n  ── LSTM : Entraînement"
-          + (" (avec attention)" if LSTM_CONFIG.get('use_attention') else "") + " ──")
-    lstm_trainer       = LSTMTrainer(LSTM_CONFIG, save_dir="models")
-    lstm_model, history = lstm_trainer.train(sequences, targets)
-
-    # 8. Extract embeddings
-    print("\n  ── LSTM : Extraction embeddings ──")
-    embeddings = lstm_trainer.extract_embeddings(lstm_model, sequences)
-    print(f"  Embeddings : {embeddings.shape}")
-
-    # 9. Feature merger
-    n_features = len(FEATURE_COLS)
-    print(f"\n  ── Fusion features ({n_features}) ──")
-    merger   = FeatureMerger(LSTM_CONFIG['embedding_dim'])
-    df_final = merger.merge(df, embeddings, seq_ids)
-    df_final.to_parquet("data/processed/final_train.parquet", index=False)
-    print(f"  final_train.parquet : {df_final.shape}")
-
-    # 10. CatBoost train (avec calibration isotonique intégrée)
+    # 2. CatBoost train (calibration isotonique intégrée)
     use_two_stage = getattr(args, 'two_stage', False)
     print(f"\n  ── CatBoost : Entraînement"
           + (" (two-stage)" if use_two_stage else "") + " ──")
     cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
     if use_two_stage:
         model_low, model_high, results_low, results_high = cb_trainer.train_two_stage(
-            df_final, calibrate=True
+            df, calibrate=True
         )
-        # two_stage retourne tuples (s1, s2, threshold) pour models
-        model_low_pred  = model_low[1]   # stage-2 pour SHAP
+        model_low_pred  = model_low[1]
         model_high_pred = model_high[1]
     else:
         model_low, model_high, results_low, results_high = cb_trainer.train(
-            df_final, calibrate=True
+            df, calibrate=True
         )
         model_low_pred  = model_low
         model_high_pred = model_high
 
-    # 11. Métriques + seuil optimisé
-    print("\n  ── Évaluation + seuil optimal ──")
-    evaluator = ModelEvaluator("outputs/metrics")
+    # 3. Métriques + seuils optimisés → sauvegarde JSON
+    print("\n  ── Évaluation + seuils optimaux ──")
+    evaluator       = ModelEvaluator("outputs/metrics")
+    saved_thresholds = {}
+    all_metrics     = []
 
-    all_metrics = []
-    for seg_name, results in [("catboost_low_hybrid",  results_low),
-                               ("catboost_high_hybrid", results_high)]:
-        # Seuil F2 (rappel)
-        t_f2, _, _ = optimize_threshold(results['y_true'], results['y_proba'], strategy='f2')
-        # Seuil précision-cible 10%
-        t_pt, _, _ = optimize_threshold(results['y_true'], results['y_proba'],
-                                        strategy='precision_target', min_precision=0.10)
+    for seg_name, seg_key, results in [
+        ("catboost_low_hybrid",  "LOW",  results_low),
+        ("catboost_high_hybrid", "HIGH", results_high),
+    ]:
+        t_f2, _, _ = optimize_threshold(
+            results['y_true'], results['y_proba'], strategy='f2')
+        t_pt, _, _ = optimize_threshold(
+            results['y_true'], results['y_proba'],
+            strategy='precision_target', min_precision=0.10)
+
+        saved_thresholds[seg_key] = {'f2': round(t_f2, 4), 'precision_target': round(t_pt, 4)}
+
         m_f2 = evaluator.evaluate(results['y_true'], results['y_proba'],
-                                  f"{seg_name}_f2",    threshold=t_f2)
+                                  f"{seg_name}_f2",     threshold=t_f2)
         m_pt = evaluator.evaluate(results['y_true'], results['y_proba'],
                                   f"{seg_name}_prec10", threshold=t_pt)
         all_metrics.extend([m_f2, m_pt])
         print(f"  {seg_name} | seuil F2={t_f2:.3f}  seuil prec10={t_pt:.3f}")
 
+    os.makedirs("models", exist_ok=True)
+    with open("models/thresholds.json", 'w') as f:
+        json.dump(saved_thresholds, f, indent=2)
+    print(f"\n  Seuils sauvegardés → models/thresholds.json")
+    print(f"  {json.dumps(saved_thresholds, indent=4)}")
+
     evaluator.compare(all_metrics)
 
-    # 12. SHAP
+    # 4. SHAP
     print("\n  ── SHAP ──")
     shap_engine = SHAPEngine(
         FEATURE_COLS, CAT_FEATURES, LSTM_EMBEDDING_COLS,
         FEATURE_LABELS, SHAP_CONFIG['top_k'],
     )
-    shap_engine.run(df_final, model_low_pred, model_high_pred, "outputs/shap")
+    shap_engine.run(df, model_low_pred, model_high_pred, "outputs/shap")
 
-    # 13. Error analysis
+    # 5. Error analysis
     print("\n  ── Analyse erreurs (segment LOW) ──")
-    df_low_eval = df_final[df_final['revenu_principal'] <= revenu_treshold].copy()
+    df_low_eval = df[df['revenu_principal'] <= revenu_treshold].copy()
     if len(df_low_eval) > 0 and 'target' in df_low_eval.columns:
         analyzer = ErrorAnalyzer()
         analyzer.analyze(
@@ -199,43 +182,18 @@ def run_infer(args):
     check_artifacts()
     print("  Artefacts OK")
 
-    # 2-5. Données
+    # 2. Données
     files = [args.data] if args.data else INFER_FILES
     df    = build_base(files, "data/processed/inference_base.parquet", args.force_rebuild)
     print(f"  Base inférence : {len(df):,} clients")
 
-    # 6-7. SequenceBuilder.transform (charge scaler, pas de fit)
-    print("\n  ── LSTM : SequenceBuilder ──")
-    seq_builder        = SequenceBuilder("models/lstm_scaler.pkl")
-    sequences, seq_ids = seq_builder.transform(df)
-
-    # 8. Charger LSTM encoder + encode
-    print("\n  ── LSTM : Chargement + encodage ──")
-    device     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    lstm_model = build_lstm_encoder(LSTM_CONFIG)
-    lstm_model.load_state_dict(
-        torch.load("models/lstm_encoder.pt", map_location=device)
-    )
-    lstm_model.to(device).eval()
-
-    lstm_trainer = LSTMTrainer(LSTM_CONFIG, save_dir="models")
-    embeddings   = lstm_trainer.extract_embeddings(lstm_model, sequences)
-    print(f"  Embeddings : {embeddings.shape}")
-
-    # 9. Feature merger
-    print("\n  ── Fusion features (52) ──")
-    merger   = FeatureMerger(LSTM_CONFIG['embedding_dim'])
-    df_final = merger.merge(df, embeddings, seq_ids)
-    df_final.to_parquet("data/processed/final_infer.parquet", index=False)
-    print(f"  final_infer.parquet : {df_final.shape}")
-
-    # 10. CatBoost predict (split SIMPLE par revenu, avec calibration si dispo)
+    # 3. CatBoost predict (seuils optimisés chargés automatiquement)
     use_two_stage = getattr(args, 'two_stage', False)
     print(f"\n  ── CatBoost : Prédictions"
           + (" (two-stage)" if use_two_stage else "") + " ──")
     cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
     df_results = cb_trainer.predict(
-        df_final, model_dir="models",
+        df, model_dir="models",
         use_two_stage=use_two_stage, use_calibration=True,
     )
     print(f"\n  Résultats : {len(df_results):,} clients")
@@ -245,20 +203,32 @@ def run_infer(args):
     df_results.to_parquet("outputs/inference_results.parquet", index=False)
     print(f"  Sauvegardé → outputs/inference_results.parquet")
 
-    # 11. Si target disponible : évaluation
-    if 'target' in df_final.columns:
+    # 4. Si target disponible : évaluation avec seuil F2 pondéré
+    if 'target' in df.columns:
         print("\n  ── Évaluation (target disponible) ──")
+        thresholds_data = {}
+        if os.path.exists("models/thresholds.json"):
+            with open("models/thresholds.json") as f:
+                thresholds_data = json.load(f)
+        # Seuil représentatif : moyenne des seuils F2 LOW et HIGH
+        t_low  = thresholds_data.get('LOW',  {}).get('f2', 0.5)
+        t_high = thresholds_data.get('HIGH', {}).get('f2', 0.5)
+        n_low  = (df['revenu_principal'] <= revenu_treshold).sum()
+        n_high = len(df) - n_low
+        eval_threshold = (t_low * n_low + t_high * n_high) / len(df)
+
         df_merged_eval = df_results.merge(
-            df_final[['id_client', 'target']], on='id_client', how='left'
+            df[['id_client', 'target']], on='id_client', how='left'
         )
         evaluator = ModelEvaluator("outputs/metrics")
         evaluator.evaluate(
             df_merged_eval['target'].values,
             df_merged_eval['proba'].values,
             "infer_evaluation",
+            threshold=eval_threshold,
         )
 
-    # 12. SHAP
+    # 5. SHAP
     if not args.skip_shap:
         print("\n  ── SHAP ──")
         from catboost import CatBoostClassifier
@@ -271,7 +241,7 @@ def run_infer(args):
             FEATURE_COLS, CAT_FEATURES, LSTM_EMBEDDING_COLS,
             FEATURE_LABELS, SHAP_CONFIG['top_k'],
         )
-        shap_engine.run(df_final, model_low, model_high, "outputs/shap")
+        shap_engine.run(df, model_low, model_high, "outputs/shap")
 
     print("\n" + "═" * 60)
     print("  ✅ INFER TERMINÉ")
