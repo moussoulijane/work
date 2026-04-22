@@ -275,3 +275,50 @@ def add_appetite_signals(df: pd.DataFrame) -> pd.DataFrame:
 
     logger.info(f"Appetite signals ajoutés → {len(df):,} lignes")
     return df
+
+
+def add_credit_context_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Features de contexte crédit basées sur l'encours existant.
+    Capturent les moments de vie favorables à la souscription :
+
+    - credit_presque_fini   : durée restante < 12 mois (appétit de renouvellement)
+    - credit_en_cours       : a au moins une mensualité active (0/1)
+    - marge_33pct_seuil     : distance à la règle des 33% (>0 = peut emprunter plus)
+    - age_prime_credit      : 28-55 ans (pic d'appétence crédit)
+    - score_global_appétence: score synthétique pondéré des signaux clés
+    """
+    df = df.copy()
+
+    dur  = df['duree_restante_ponderee'] if 'duree_restante_ponderee' in df.columns else pd.Series(0, index=df.index)
+    mens = df['total_mensualite_actif']  if 'total_mensualite_actif'  in df.columns else pd.Series(0, index=df.index)
+    rev  = df['revenu_principal'].clip(lower=1) if 'revenu_principal' in df.columns else pd.Series(1, index=df.index)
+    age  = df['age']                     if 'age'                     in df.columns else pd.Series(40, index=df.index)
+
+    # Crédit presque fini (0 < durée restante < 12 mois) → appétit de renouvellement
+    df['credit_presque_fini'] = ((dur > 0) & (dur < 12)).astype(np.float32)
+
+    # A un crédit actif
+    df['credit_en_cours'] = (mens > 0).astype(np.float32)
+
+    # Marge au-dessus de la règle des 33% (capacité d'endettement résiduelle normalisée)
+    df['marge_33pct_seuil'] = ((rev * 0.33 - mens) / (rev + 1.0)).clip(-1, 1).astype(np.float32)
+
+    # Tranche d'âge prime crédit (28-55 ans) — lifecycle peak
+    df['age_prime_credit'] = ((age >= 28) & (age <= 55)).astype(np.float32)
+
+    # Score synthétique d'appétence (combinaison pondérée des signaux forts)
+    simul    = df['count_simul'].clip(lower=0)          if 'count_simul'           in df.columns else 0
+    simul_n1 = df['count_simul_mois_n_1'].clip(lower=0) if 'count_simul_mois_n_1' in df.columns else 0
+    cap_norm = df['marge_33pct_seuil'].clip(lower=0)
+
+    df['score_appetence'] = (
+        np.log1p(simul) * 0.40       # intention (forte pondération)
+        + np.log1p(simul_n1) * 0.30  # récence (signal fort)
+        + cap_norm * 0.15             # capacité financière
+        + df['age_prime_credit'] * 0.10
+        + df['credit_presque_fini'] * 0.05
+    ).astype(np.float32)
+
+    logger.info(f"Credit context features ajoutées → {len(df):,} lignes")
+    return df

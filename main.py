@@ -33,7 +33,7 @@ from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
 from src.feature_engineering import (
     add_balance_features, add_advanced_features,
-    add_temporal_features, add_appetite_signals,
+    add_temporal_features, add_appetite_signals, add_credit_context_features,
 )
 from src.catboost_trainer import CatBoostTrainer
 from src.calibration import ProbabilityCalibrator
@@ -73,8 +73,9 @@ def build_base(files: list[str], cache_path: str, force_rebuild: bool) -> pd.Dat
     df = preprocess(df)
     df = add_balance_features(df)
     df = add_advanced_features(df)
-    df = add_temporal_features(df)   # 14 features temporelles (remplace LSTM)
-    df = add_appetite_signals(df)    # 10 signaux d'appétence (interactions + minima)
+    df = add_temporal_features(df)        # 14 features temporelles
+    df = add_appetite_signals(df)         # 10 signaux d'appétence
+    df = add_credit_context_features(df)  # 5 features contexte crédit
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     df.to_parquet(cache_path, index=False)
     print(f"  Base sauvegardée → {cache_path}")
@@ -97,64 +98,96 @@ def run_train(args):
     print(f"  Base : {len(df):,} clients  |  positifs : {n_pos:,}  "
           f"({n_pos / len(df):.2%})")
 
-    # 2. CatBoost train (calibration isotonique intégrée)
+    # 2. CatBoost train
     use_two_stage = getattr(args, 'two_stage', False)
     print(f"\n  ── CatBoost : Entraînement"
           + (" (two-stage)" if use_two_stage else "") + " ──")
     cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
     if use_two_stage:
-        model_low, model_high, results_low, results_high = cb_trainer.train_two_stage(
-            df, calibrate=True
+        model_low_cb, model_high_cb, results_low_cb, results_high_cb = (
+            cb_trainer.train_two_stage(df, calibrate=True)
         )
-        model_low_pred  = model_low[1]
-        model_high_pred = model_high[1]
+        model_low_shap  = model_low_cb[1]
+        model_high_shap = model_high_cb[1]
     else:
-        model_low, model_high, results_low, results_high = cb_trainer.train(
-            df, calibrate=True
+        model_low_cb, model_high_cb, results_low_cb, results_high_cb = (
+            cb_trainer.train(df, calibrate=True)
         )
-        model_low_pred  = model_low
-        model_high_pred = model_high
+        model_low_shap  = model_low_cb
+        model_high_shap = model_high_cb
 
-    # 3. Métriques + seuils optimisés → sauvegarde JSON
+    # 3. LightGBM train (ensemble avec CatBoost)
+    lgbm_results_low  = results_low_cb
+    lgbm_results_high = results_high_cb
+    lgbm_available    = False
+    try:
+        from src.lgbm_trainer import LGBMTrainer
+        print(f"\n  ── LightGBM : Entraînement ──")
+        lgbm_trainer = LGBMTrainer(FEATURE_COLS, CAT_FEATURES, revenu_treshold)
+        _, _, lgbm_results_low, lgbm_results_high = lgbm_trainer.train(df, calibrate=True)
+        lgbm_available = True
+        print("  LightGBM entraîné ✓")
+    except Exception as e:
+        print(f"  LightGBM ignoré ({e})")
+
+    # 4. Ensemble : moyenne CatBoost + LightGBM
+    def _ensemble(r_cb, r_lgbm, use_lgbm):
+        if not use_lgbm:
+            return r_cb
+        return {
+            'y_true':  r_cb['y_true'],
+            'y_proba': (r_cb['y_proba'] + r_lgbm['y_proba']) / 2.0,
+        }
+
+    results_low  = _ensemble(results_low_cb,  lgbm_results_low,  lgbm_available)
+    results_high = _ensemble(results_high_cb, lgbm_results_high, lgbm_available)
+    suffix_label = "ensemble CatBoost+LGBM" if lgbm_available else "CatBoost"
+    print(f"\n  Modèle final : {suffix_label}")
+
+    # 5. Métriques + seuils optimisés → sauvegarde JSON
     print("\n  ── Évaluation + seuils optimaux ──")
-    evaluator       = ModelEvaluator("outputs/metrics")
+    evaluator        = ModelEvaluator("outputs/metrics")
     saved_thresholds = {}
-    all_metrics     = []
+    all_metrics      = []
 
     for seg_name, seg_key, results in [
-        ("catboost_low_hybrid",  "LOW",  results_low),
-        ("catboost_high_hybrid", "HIGH", results_high),
+        ("low_hybrid",  "LOW",  results_low),
+        ("high_hybrid", "HIGH", results_high),
     ]:
-        t_f2, _, _ = optimize_threshold(
-            results['y_true'], results['y_proba'], strategy='f2')
-        t_pt, _, _ = optimize_threshold(
+        t_f2, _, _    = optimize_threshold(results['y_true'], results['y_proba'], strategy='f2')
+        t_youden, _,_ = optimize_threshold(results['y_true'], results['y_proba'], strategy='youden')
+        t_pt, _, _    = optimize_threshold(
             results['y_true'], results['y_proba'],
             strategy='precision_target', min_precision=0.10)
 
-        saved_thresholds[seg_key] = {'f2': round(t_f2, 4), 'precision_target': round(t_pt, 4)}
+        saved_thresholds[seg_key] = {
+            'f2':               round(t_f2, 4),
+            'youden':           round(t_youden, 4),
+            'precision_target': round(t_pt, 4),
+        }
 
         m_f2 = evaluator.evaluate(results['y_true'], results['y_proba'],
                                   f"{seg_name}_f2",     threshold=t_f2)
+        m_yd = evaluator.evaluate(results['y_true'], results['y_proba'],
+                                  f"{seg_name}_youden", threshold=t_youden)
         m_pt = evaluator.evaluate(results['y_true'], results['y_proba'],
                                   f"{seg_name}_prec10", threshold=t_pt)
-        all_metrics.extend([m_f2, m_pt])
-        print(f"  {seg_name} | seuil F2={t_f2:.3f}  seuil prec10={t_pt:.3f}")
+        all_metrics.extend([m_f2, m_yd, m_pt])
+        print(f"  {seg_key} | F2={t_f2:.3f}  Youden={t_youden:.3f}  prec10={t_pt:.3f}")
 
     os.makedirs("models", exist_ok=True)
     with open("models/thresholds.json", 'w') as f:
         json.dump(saved_thresholds, f, indent=2)
     print(f"\n  Seuils sauvegardés → models/thresholds.json")
-    print(f"  {json.dumps(saved_thresholds, indent=4)}")
-
     evaluator.compare(all_metrics)
 
-    # 4. SHAP
+    # 6. SHAP (sur modèle CatBoost uniquement — TreeSHAP)
     print("\n  ── SHAP ──")
     shap_engine = SHAPEngine(
         FEATURE_COLS, CAT_FEATURES, LSTM_EMBEDDING_COLS,
         FEATURE_LABELS, SHAP_CONFIG['top_k'],
     )
-    shap_engine.run(df, model_low_pred, model_high_pred, "outputs/shap")
+    shap_engine.run(df, model_low_shap, model_high_shap, "outputs/shap")
 
     # 5. Error analysis (avec seuil optimisé)
     print("\n  ── Analyse erreurs (segment LOW) ──")
@@ -193,7 +226,7 @@ def run_infer(args):
     df    = build_base(files, "data/processed/inference_base.parquet", args.force_rebuild)
     print(f"  Base inférence : {len(df):,} clients")
 
-    # 3. CatBoost predict (seuils optimisés chargés automatiquement)
+    # 3. CatBoost predict
     use_two_stage = getattr(args, 'two_stage', False)
     print(f"\n  ── CatBoost : Prédictions"
           + (" (two-stage)" if use_two_stage else "") + " ──")
@@ -202,6 +235,34 @@ def run_infer(args):
         df, model_dir="models",
         use_two_stage=use_two_stage, use_calibration=True,
     )
+
+    # 4. LightGBM predict + fusion des probas (si modèles disponibles)
+    try:
+        from src.lgbm_trainer import LGBMTrainer
+        lgbm_low_path  = f"models/{revenu_treshold}_lgbm_low.txt"
+        lgbm_high_path = f"models/{revenu_treshold}_lgbm_high.txt"
+        if os.path.exists(lgbm_low_path) and os.path.exists(lgbm_high_path):
+            print("\n  ── LightGBM : Prédictions + ensemble ──")
+            lgbm_trainer  = LGBMTrainer(FEATURE_COLS, CAT_FEATURES, revenu_treshold)
+            lgbm_proba_map = lgbm_trainer.predict(df, model_dir="models", use_calibration=True)
+            # Moyenne des probas CatBoost et LightGBM
+            df_results['proba'] = df_results.apply(
+                lambda r: (r['proba'] + lgbm_proba_map.get(r['id_client'], r['proba'])) / 2.0,
+                axis=1,
+            )
+            print("  Ensemble CatBoost + LightGBM ✓")
+    except Exception as e:
+        logger.warning(f"Ensemble LightGBM ignoré : {e}")
+
+    # Re-appliquer les seuils après fusion
+    if os.path.exists("models/thresholds.json"):
+        with open("models/thresholds.json") as _f:
+            _th = json.load(_f)
+        df_results['prediction'] = df_results.apply(
+            lambda r: int(r['proba'] >= _th.get(r['segment_model'], {}).get('f2', 0.5)),
+            axis=1,
+        )
+
     print(f"\n  Résultats : {len(df_results):,} clients")
     print(f"  Positifs prédits : {int(df_results['prediction'].sum()):,}")
 

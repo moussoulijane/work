@@ -57,13 +57,20 @@ class CatBoostTrainer:
 
     def split_data(self, df: pd.DataFrame, mode: str = 'train'):
         """
-        mode='train' : chaque modèle entraîné sur son segment uniquement.
-                       Évite la contamination inter-segments (covariate shift).
-                       scale_pos_weight gère le déséquilibre au sein de chaque segment.
+        mode='train' : ASYMÉTRIQUE — tous les positifs dans LOW et HIGH.
+                       Donne à chaque modèle le maximum d'exemples positifs.
+                       CatBoost gère le covariate shift via la feature revenu_principal.
         mode='infer' : filtre par revenu uniquement.
         """
         if mode == 'train':
             assert 'target' in df.columns, "Mode train requiert la colonne 'target'"
+            df_pos      = df[df['target'] == 1]
+            df_neg_low  = df[(df['target'] == 0) & (df['revenu_principal'] <= self.threshold)]
+            df_neg_high = df[(df['target'] == 0) & (df['revenu_principal'] >  self.threshold)]
+            return (
+                pd.concat([df_pos, df_neg_low],  ignore_index=True),
+                pd.concat([df_pos, df_neg_high], ignore_index=True),
+            )
         return (
             df[df['revenu_principal'] <= self.threshold].copy(),
             df[df['revenu_principal'] >  self.threshold].copy(),
@@ -118,7 +125,8 @@ class CatBoostTrainer:
     # Train standard
     # ─────────────────────────────────────────────────────────
 
-    def train(self, df: pd.DataFrame, save_dir: str = "models", calibrate: bool = True):
+    def train(self, df: pd.DataFrame, save_dir: str = "models", calibrate: bool = True,
+              use_smote: bool = False):
         """
         MODE TRAIN : split asymétrique → 70/30 stratifié → fit → calibration → save.
 
@@ -147,12 +155,14 @@ class CatBoostTrainer:
 
             n_pos = int((y_tr == 1).sum())
             n_neg = int((y_tr == 0).sum())
-            spw   = n_neg / n_pos
             print(f"  train={len(y_tr):,}  eval={len(y_te):,}  "
                   f"positifs={n_pos}  ratio={n_neg/n_pos:.0f}:1")
 
-            # SMOTE sur les features numériques (oversample les positifs ×5 max)
-            X_tr_fit, y_tr_fit = self._apply_smote(X_tr, y_tr, cat_idx)
+            # SMOTE optionnel — si activé, recalculer scale_pos_weight après resampling
+            X_tr_fit, y_tr_fit = (
+                self._apply_smote(X_tr, y_tr, cat_idx) if use_smote else (X_tr, y_tr)
+            )
+            spw = int((y_tr_fit == 0).sum()) / max(1, int((y_tr_fit == 1).sum()))
 
             model = CatBoostClassifier(**{**self.model_params, 'scale_pos_weight': spw})
             model.fit(X_tr_fit, y_tr_fit, cat_features=cat_idx, eval_set=(X_te, y_te))

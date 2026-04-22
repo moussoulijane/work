@@ -60,9 +60,17 @@ APPETITE_SIGNAL_COLS = [
     'ratio_endettement_vs_cap', # taux_endettement / capacite_résiduelle
 ]
 
-# 11 statiques + 9 stats + 6 avancées + 14 temporelles + 10 signaux = 50 features
+CREDIT_CONTEXT_COLS = [
+    'credit_presque_fini',   # durée restante < 12 mois
+    'credit_en_cours',       # a une mensualité active
+    'marge_33pct_seuil',     # marge normalisée règle 33%
+    'age_prime_credit',      # 28-55 ans (peak crédit)
+    'score_appetence',       # score synthétique pondéré
+]
+
+# 11 statiques + 9 stats + 6 avancées + 14 temporelles + 10 signaux + 5 contexte = 55 features
 FEATURE_COLS = (STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS
-                + TEMPORAL_FEATURE_COLS + APPETITE_SIGNAL_COLS)
+                + TEMPORAL_FEATURE_COLS + APPETITE_SIGNAL_COLS + CREDIT_CONTEXT_COLS)
 
 # Conservé pour compatibilité avec les anciens artefacts LSTM
 LSTM_EMBEDDING_COLS = []
@@ -144,4 +152,10 @@ FEATURE_LABELS = {
     'solde_min_m3':               'Creux de solde mois 3',
     'is_stable_last_month':       'Aucun découvert dernier mois',
     'ratio_endettement_vs_cap':   'Ratio endettement / capacité résiduelle',
+    # Contexte crédit
+    'credit_presque_fini':        'Crédit presque remboursé (< 12 mois)',
+    'credit_en_cours':            'A un crédit actif',
+    'marge_33pct_seuil':          'Marge règle des 33%',
+    'age_prime_credit':           'Âge prime crédit (28-55 ans)',
+    'score_appetence':            'Score synthétique d\'appétence',
 }
