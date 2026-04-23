@@ -68,30 +68,46 @@ CREDIT_CONTEXT_COLS = [
     'score_appetence',       # score synthétique pondéré
 ]
 
-# 11 statiques + 9 stats + 6 avancées + 14 temporelles + 10 signaux + 5 contexte = 55 features
+INTERACTION_FEATURE_COLS = [
+    'ratio_epargne_revenu',      # solde_moyen / revenu (liquidité normalisée)
+    'marge_relative',            # marge_mensuelle / revenu (% revenu disponible)
+    'solde_vs_mensualite',       # solde_moyen / mensualités (buffer de liquidité)
+    'intensite_simul_ponderee',  # (simul + 3×simul_n1) / (revenu/kMAD + 1)
+    'fragilite_relative',        # score_fragilite / (revenu/kMAD + 1)
+    'stabilite_x_capacite',      # pct_jours_positifs × (1 - taux_endettement)
+]
+
+# 11 statiques + 9 stats + 6 avancées + 14 temporelles + 10 signaux + 5 contexte + 6 interactions = 61 features
 FEATURE_COLS = (STATIC_FEATURE_COLS + BALANCE_STAT_COLS + ADVANCED_FEATURE_COLS
-                + TEMPORAL_FEATURE_COLS + APPETITE_SIGNAL_COLS + CREDIT_CONTEXT_COLS)
+                + TEMPORAL_FEATURE_COLS + APPETITE_SIGNAL_COLS + CREDIT_CONTEXT_COLS
+                + INTERACTION_FEATURE_COLS)
 
 # Conservé pour compatibilité avec les anciens artefacts LSTM
 LSTM_EMBEDDING_COLS = []
 LSTM_CONFIG = {}
 
 MODEL_PARAMS = {
-    'iterations':            2000,
-    'learning_rate':         0.03,   # LR plus faible → plus d'arbres, meilleure généralisation
-    'depth':                 7,
-    'l2_leaf_reg':           5,      # régularisation L2 (réduit l'overfitting)
-    'min_data_in_leaf':      30,     # feuilles plus grandes (robustesse sur classes rares)
+    'iterations':            3000,
+    'learning_rate':         0.02,   # LR réduit → convergence plus fine, meilleure généralisation
+    'grow_policy':           'Lossguide',  # leaf-wise (comme LGBM) : meilleur AUC sur données déséquilibrées
+    'max_leaves':            63,           # remplace depth avec Lossguide
+    'l2_leaf_reg':           3,
+    'min_data_in_leaf':      20,
     'loss_function':         'Logloss',
     'eval_metric':           'AUC',
     'random_seed':           42,
-    'verbose':               200,
-    'early_stopping_rounds': 100,
+    'verbose':               500,
+    'early_stopping_rounds': 150,
     'task_type':             'CPU',
     'bootstrap_type':        'Bernoulli',
     'subsample':             0.8,
-    'colsample_bylevel':     0.7,    # sous-échantillonnage des features par nœud
+    'colsample_bylevel':     0.7,
+    'random_strength':       1.5,    # exploration accrue → réduit l'overfitting
+    'border_count':          254,    # bins fins pour features numériques
+    'one_hot_max_size':      5,      # one-hot pour catégorielles à peu de modalités
 }
+
+N_FOLDS = 5   # K-Fold stratifié — entraîne N modèles par segment, moyenne à l'inférence
 
 SHAP_CONFIG = {
     'top_k':               5,
@@ -158,4 +174,11 @@ FEATURE_LABELS = {
     'marge_33pct_seuil':          'Marge règle des 33%',
     'age_prime_credit':           'Âge prime crédit (28-55 ans)',
     'score_appetence':            'Score synthétique d\'appétence',
+    # Interactions
+    'ratio_epargne_revenu':       'Ratio épargne / revenu',
+    'marge_relative':             'Marge mensuelle (% du revenu)',
+    'solde_vs_mensualite':        'Buffer de liquidité (solde / mensualités)',
+    'intensite_simul_ponderee':   'Intensité simulation pondérée revenu',
+    'fragilite_relative':         'Fragilité relative au revenu',
+    'stabilite_x_capacite':       'Stabilité × capacité d\'endettement résiduelle',
 }

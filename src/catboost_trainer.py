@@ -122,17 +122,127 @@ class CatBoostTrainer:
             return X, y
 
     # ─────────────────────────────────────────────────────────
-    # Train standard
+    # Train K-Fold OOF (recommandé — meilleur AUC + calibration fiable)
+    # ─────────────────────────────────────────────────────────
+
+    def train_kfold(self, df: pd.DataFrame, n_splits: int = 5,
+                    save_dir: str = "models", calibrate: bool = True) -> tuple:
+        """
+        K-Fold stratifié avec OOF (Out-Of-Fold) predictions.
+
+        Pourquoi c'est mieux qu'un seul split 70/30 :
+        - Chaque modèle entraîné sur ~80% de la data (vs 70%)
+        - OOF couvre 100% de la base → calibration bien plus fiable
+        - Ensemble de N modèles → variance réduite (+0.01-0.02 AUC typique)
+        - Pas de data leakage dans la calibration
+
+        Sauvegarde :
+            {thr}_catboost_{seg}_fold{k}.cbm  — N modèles de fold
+            {thr}_catboost_{seg}.cbm          — copie du fold_0 (rétrocompat SHAP)
+            calibrator_{seg}.pkl              — calibré sur OOF complets
+            kfold_meta_{seg}.json             — n_splits + feature list
+
+        Returns:
+            model_low_fold0, model_high_fold0 : premier modèle de fold (pour SHAP)
+            results_low, results_high         : dict avec OOF predictions
+        """
+        import json
+        from sklearn.model_selection import StratifiedKFold
+        from src.calibration import ProbabilityCalibrator
+
+        os.makedirs(save_dir, exist_ok=True)
+        df_low, df_high = self.split_data(df, mode='train')
+
+        fold_models = {}
+        results     = {}
+
+        for name, df_seg in [("LOW", df_low), ("HIGH", df_high)]:
+            print(f"\n  [K-Fold] Segment {name} — {len(df_seg):,} clients  ({n_splits} folds)")
+
+            X       = _prepare_X(df_seg, self.feature_cols, self.cat_features)
+            y       = df_seg['target'].reset_index(drop=True)
+            cat_idx = [X.columns.tolist().index(c) for c in self.cat_features if c in X.columns]
+
+            n_pos_total = int((y == 1).sum())
+            n_neg_total = int((y == 0).sum())
+            print(f"  total={len(y):,}  positifs={n_pos_total}  ratio={n_neg_total/n_pos_total:.0f}:1")
+
+            skf       = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+            oof_proba = np.zeros(len(y), dtype=np.float64)
+            auc_folds = []
+            first_model = None
+
+            for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
+                X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
+                y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
+
+                n_pos = int((y_tr == 1).sum())
+                n_neg = int((y_tr == 0).sum())
+                spw   = n_neg / max(n_pos, 1)
+
+                model = CatBoostClassifier(**{**self.model_params, 'scale_pos_weight': spw})
+                model.fit(X_tr, y_tr, cat_features=cat_idx,
+                          eval_set=(X_va, y_va), verbose=False)
+
+                fold_proba      = model.predict_proba(X_va)[:, 1]
+                oof_proba[va_idx] = fold_proba
+                fold_auc          = roc_auc_score(y_va, fold_proba)
+                auc_folds.append(fold_auc)
+                print(f"    Fold {fold+1}/{n_splits}  AUC={fold_auc:.4f}  "
+                      f"best_iter={model.best_iteration_}")
+
+                model_path = os.path.join(
+                    save_dir, f"{self.threshold}_catboost_{name.lower()}_fold{fold}.cbm"
+                )
+                model.save_model(model_path)
+
+                if first_model is None:
+                    first_model = model
+
+            oof_auc = roc_auc_score(y, oof_proba)
+            print(f"  AUC OOF {name} : {oof_auc:.4f}  "
+                  f"(folds: {np.mean(auc_folds):.4f} ± {np.std(auc_folds):.4f})")
+
+            # Calibration sur OOF complet → nettement plus fiable qu'un seul hold-out
+            oof_proba_cal = oof_proba
+            if calibrate:
+                cal = ProbabilityCalibrator()
+                cal.fit(y.values, oof_proba)
+                oof_proba_cal = cal.transform(oof_proba)
+                cal.save(os.path.join(save_dir, f"calibrator_{name.lower()}.pkl"))
+
+            # Copie du fold_0 comme modèle canonique (SHAP + rétrocompat)
+            canon_path = os.path.join(save_dir, f"{self.threshold}_catboost_{name.lower()}.cbm")
+            first_model.save_model(canon_path)
+            first_model.get_feature_importance(prettified=True).to_csv(
+                os.path.join(save_dir, f"feature_importance_{name.lower()}.csv"), index=False
+            )
+
+            # Métadonnées K-Fold pour l'inférence
+            meta = {'n_splits': n_splits, 'feature_cols': X.columns.tolist(),
+                    'oof_auc': round(oof_auc, 6)}
+            with open(os.path.join(save_dir, f"kfold_meta_{name.lower()}.json"), 'w') as f:
+                json.dump(meta, f, indent=2)
+
+            fold_models[name] = first_model
+            results[name] = {
+                'y_true':      y.values,
+                'y_proba':     oof_proba_cal,
+                'y_proba_raw': oof_proba,
+                'y_pred':      (oof_proba_cal >= 0.5).astype(int),
+            }
+
+        return fold_models['LOW'], fold_models['HIGH'], results['LOW'], results['HIGH']
+
+    # ─────────────────────────────────────────────────────────
+    # Train standard (fallback / compatibilité)
     # ─────────────────────────────────────────────────────────
 
     def train(self, df: pd.DataFrame, save_dir: str = "models", calibrate: bool = True,
               use_smote: bool = False):
         """
-        MODE TRAIN : split asymétrique → 70/30 stratifié → fit → calibration → save.
-
-        Returns:
-            model_low, model_high       : CatBoostClassifier entraînés
-            results_low, results_high   : dict(y_true, y_proba, y_proba_cal, y_pred)
+        Split 70/30 unique — conservé pour compatibilité.
+        Préférer train_kfold() pour des performances optimales.
         """
         from src.calibration import ProbabilityCalibrator
 
@@ -145,8 +255,8 @@ class CatBoostTrainer:
         for name, df_seg in [("LOW", df_low), ("HIGH", df_high)]:
             print(f"\n  Segment {name} — {len(df_seg):,} clients")
 
-            X   = _prepare_X(df_seg, self.feature_cols, self.cat_features)
-            y   = df_seg['target'].reset_index(drop=True)
+            X       = _prepare_X(df_seg, self.feature_cols, self.cat_features)
+            y       = df_seg['target'].reset_index(drop=True)
             cat_idx = [X.columns.tolist().index(c) for c in self.cat_features if c in X.columns]
 
             X_tr, X_te, y_tr, y_te = train_test_split(
@@ -158,7 +268,6 @@ class CatBoostTrainer:
             print(f"  train={len(y_tr):,}  eval={len(y_te):,}  "
                   f"positifs={n_pos}  ratio={n_neg/n_pos:.0f}:1")
 
-            # SMOTE optionnel — si activé, recalculer scale_pos_weight après resampling
             X_tr_fit, y_tr_fit = (
                 self._apply_smote(X_tr, y_tr, cat_idx) if use_smote else (X_tr, y_tr)
             )
@@ -171,7 +280,6 @@ class CatBoostTrainer:
             auc     = roc_auc_score(y_te, y_proba)
             print(f"  AUC {name} (eval set) : {auc:.4f}")
 
-            # ── Calibration isotonique ──
             y_proba_cal = y_proba
             if calibrate:
                 cal = ProbabilityCalibrator()
@@ -179,7 +287,6 @@ class CatBoostTrainer:
                 y_proba_cal = cal.transform(y_proba)
                 cal.save(os.path.join(save_dir, f"calibrator_{name.lower()}.pkl"))
 
-            # Sauvegarde
             cbm_path = os.path.join(save_dir, f"{self.threshold}_catboost_{name.lower()}.cbm")
             model.save_model(cbm_path)
             model.get_feature_importance(prettified=True).to_csv(
@@ -189,8 +296,8 @@ class CatBoostTrainer:
             models[name]  = model
             results[name] = {
                 'y_true':      y_te.values,
-                'y_proba':     y_proba_cal,   # probabilités calibrées
-                'y_proba_raw': y_proba,        # brutes (pour debug)
+                'y_proba':     y_proba_cal,
+                'y_proba_raw': y_proba,
                 'y_pred':      model.predict(X_te),
             }
 
@@ -319,24 +426,21 @@ class CatBoostTrainer:
         """
         MODE INFER : split SIMPLE par revenu → load .cbm → predict.
 
-        use_two_stage    : utilise les modèles _s1/_s2 si disponibles
-        use_calibration  : applique la calibration isotonique si disponible
+        Détecte automatiquement les modèles K-Fold (kfold_meta_{seg}.json).
+        Si présents → moyenne de N prédictions (bagging).
+        Sinon → modèle unique (rétrocompatibilité).
         """
         import json
         import joblib
         from src.calibration import ProbabilityCalibrator
 
-        # Chargement des seuils optimisés (issus du train)
         thresholds_data = {}
         thresholds_path = os.path.join(model_dir, 'thresholds.json')
         if os.path.exists(thresholds_path):
             with open(thresholds_path) as f:
                 thresholds_data = json.load(f)
-            logger.info(f"Seuils optimisés chargés → {thresholds_path}")
         else:
-            logger.warning(
-                "thresholds.json absent — seuil 0.5 utilisé (relancer python main.py train)"
-            )
+            logger.warning("thresholds.json absent — seuil 0.5 par défaut")
 
         df_low, df_high = self.split_data(df, mode='infer')
         results_dfs = []
@@ -348,8 +452,31 @@ class CatBoostTrainer:
 
             X = _prepare_X(df_seg, self.feature_cols, self.cat_features)
 
-            _use_two_stage = use_two_stage  # copie locale pour ne pas contaminer l'itération suivante
-            if _use_two_stage:
+            probas         = None
+            used_two_stage = False
+
+            # ── Priorité 1 : K-Fold ensemble ──
+            meta_path = os.path.join(model_dir, f"kfold_meta_{name.lower()}.json")
+            if os.path.exists(meta_path) and not use_two_stage:
+                with open(meta_path) as f:
+                    n_splits = json.load(f)['n_splits']
+                fold_probas = []
+                for k in range(n_splits):
+                    fold_path = os.path.join(
+                        model_dir, f"{self.threshold}_catboost_{name.lower()}_fold{k}.cbm"
+                    )
+                    if not os.path.exists(fold_path):
+                        logger.warning(f"Fold {k} introuvable pour {name} — ignoré")
+                        continue
+                    m = CatBoostClassifier()
+                    m.load_model(fold_path)
+                    fold_probas.append(m.predict_proba(X)[:, 1])
+                if fold_probas:
+                    probas = np.mean(fold_probas, axis=0)
+                    print(f"  [{name}] Ensemble {len(fold_probas)} folds CatBoost")
+
+            # ── Priorité 2 : Two-stage ──
+            if probas is None and use_two_stage:
                 s1_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}_s1.cbm")
                 s2_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}_s2.cbm")
                 th_path = os.path.join(model_dir, f"s1_threshold_{name.lower()}.pkl")
@@ -362,30 +489,31 @@ class CatBoostTrainer:
                     probas   = np.zeros(len(X))
                     if mask.sum() > 0:
                         probas[mask] = m_s2.predict_proba(X[mask])[:, 1]
+                    used_two_stage = True
                 else:
                     logger.warning(f"Modèles two-stage absents pour {name} — fallback standard")
-                    _use_two_stage = False
 
-            if not _use_two_stage:
+            # ── Priorité 3 : modèle unique (fallback) ──
+            if probas is None:
                 cbm_path = os.path.join(model_dir, f"{self.threshold}_catboost_{name.lower()}.cbm")
                 if not os.path.exists(cbm_path):
                     raise FileNotFoundError(
                         f"{cbm_path} introuvable. Lance d'abord : python main.py train"
                     )
-                model = CatBoostClassifier()
+                model  = CatBoostClassifier()
                 model.load_model(cbm_path)
                 probas = model.predict_proba(X)[:, 1]
 
             # Calibration
             if use_calibration:
-                suffix   = "_s2" if _use_two_stage else ""
+                suffix   = "_s2" if used_two_stage else ""
                 cal_path = os.path.join(model_dir, f"calibrator_{name.lower()}{suffix}.pkl")
                 if os.path.exists(cal_path):
                     cal    = ProbabilityCalibrator.load(cal_path)
                     probas = cal.transform(probas)
 
             seg_thresholds = thresholds_data.get(name, {})
-            threshold = float(seg_thresholds.get('f2', 0.5))
+            threshold   = float(seg_thresholds.get('f2', 0.5))
             predictions = (probas >= threshold).astype(int)
             out = pd.DataFrame({
                 'id_client':     df_seg['id_client'].values,

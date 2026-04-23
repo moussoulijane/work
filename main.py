@@ -27,13 +27,14 @@ import json
 from config import (
     TRAIN_FILES, INFER_FILES, FEATURE_COLS, CAT_FEATURES,
     MODEL_PARAMS, SHAP_CONFIG, LSTM_EMBEDDING_COLS, FEATURE_LABELS,
-    revenu_treshold,
+    revenu_treshold, N_FOLDS,
 )
 from src.data_loading import load_base, merge_common
 from src.preprocessing import preprocess
 from src.feature_engineering import (
     add_balance_features, add_advanced_features,
     add_temporal_features, add_appetite_signals, add_credit_context_features,
+    add_interaction_features,
 )
 from src.catboost_trainer import CatBoostTrainer
 from src.calibration import ProbabilityCalibrator
@@ -76,6 +77,7 @@ def build_base(files: list[str], cache_path: str, force_rebuild: bool) -> pd.Dat
     df = add_temporal_features(df)        # 14 features temporelles
     df = add_appetite_signals(df)         # 10 signaux d'appétence
     df = add_credit_context_features(df)  # 5 features contexte crédit
+    df = add_interaction_features(df)     # 6 features d'interaction inter-variables
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     df.to_parquet(cache_path, index=False)
     print(f"  Base sauvegardée → {cache_path}")
@@ -98,35 +100,38 @@ def run_train(args):
     print(f"  Base : {len(df):,} clients  |  positifs : {n_pos:,}  "
           f"({n_pos / len(df):.2%})")
 
-    # 2. CatBoost train
+    # 2. CatBoost train — K-Fold OOF par défaut (meilleure AUC + calibration fiable)
     use_two_stage = getattr(args, 'two_stage', False)
-    print(f"\n  ── CatBoost : Entraînement"
-          + (" (two-stage)" if use_two_stage else "") + " ──")
-    cb_trainer = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
+    cb_trainer    = CatBoostTrainer(FEATURE_COLS, CAT_FEATURES, MODEL_PARAMS, revenu_treshold)
+
     if use_two_stage:
+        print(f"\n  ── CatBoost : Entraînement two-stage ──")
         model_low_cb, model_high_cb, results_low_cb, results_high_cb = (
             cb_trainer.train_two_stage(df, calibrate=True)
         )
         model_low_shap  = model_low_cb[1]
         model_high_shap = model_high_cb[1]
     else:
+        print(f"\n  ── CatBoost : K-Fold OOF ({N_FOLDS} folds) ──")
         model_low_cb, model_high_cb, results_low_cb, results_high_cb = (
-            cb_trainer.train(df, calibrate=True)
+            cb_trainer.train_kfold(df, n_splits=N_FOLDS, calibrate=True)
         )
-        model_low_shap  = model_low_cb
+        model_low_shap  = model_low_cb   # fold_0 pour SHAP
         model_high_shap = model_high_cb
 
-    # 3. LightGBM train (ensemble avec CatBoost)
+    # 3. LightGBM train K-Fold (ensemble avec CatBoost)
     lgbm_results_low  = results_low_cb
     lgbm_results_high = results_high_cb
     lgbm_available    = False
     try:
         from src.lgbm_trainer import LGBMTrainer
-        print(f"\n  ── LightGBM : Entraînement ──")
+        print(f"\n  ── LightGBM : K-Fold OOF ({N_FOLDS} folds) ──")
         lgbm_trainer = LGBMTrainer(FEATURE_COLS, CAT_FEATURES, revenu_treshold)
-        _, _, lgbm_results_low, lgbm_results_high = lgbm_trainer.train(df, calibrate=True)
+        _, _, lgbm_results_low, lgbm_results_high = lgbm_trainer.train_kfold(
+            df, n_splits=N_FOLDS, calibrate=True
+        )
         lgbm_available = True
-        print("  LightGBM entraîné ✓")
+        print("  LightGBM K-Fold entraîné ✓")
     except Exception as e:
         print(f"  LightGBM ignoré ({e})")
 
@@ -141,7 +146,10 @@ def run_train(args):
 
     results_low  = _ensemble(results_low_cb,  lgbm_results_low,  lgbm_available)
     results_high = _ensemble(results_high_cb, lgbm_results_high, lgbm_available)
-    suffix_label = "ensemble CatBoost+LGBM" if lgbm_available else "CatBoost"
+    suffix_label = (
+        f"ensemble K-Fold CatBoost+LGBM ({N_FOLDS} folds)" if lgbm_available
+        else f"CatBoost K-Fold OOF ({N_FOLDS} folds)"
+    )
     print(f"\n  Modèle final : {suffix_label}")
 
     # 5. Métriques + seuils optimisés → sauvegarde JSON

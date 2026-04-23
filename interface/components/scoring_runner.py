@@ -16,6 +16,7 @@ from src.calibration import ProbabilityCalibrator
 from src.feature_engineering import (
     add_advanced_features, add_appetite_signals,
     add_balance_features, add_credit_context_features, add_temporal_features,
+    add_interaction_features,
 )
 from src.preprocessing import preprocess
 
@@ -85,6 +86,7 @@ class ScoringRunner:
         df = add_temporal_features(df)
         df = add_appetite_signals(df)
         df = add_credit_context_features(df)
+        df = add_interaction_features(df)
 
         # Déterminer le segment et choisir le modèle
         revenu = float(df['revenu_principal'].iloc[0])

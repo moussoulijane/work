@@ -322,3 +322,55 @@ def add_credit_context_features(df: pd.DataFrame) -> pd.DataFrame:
 
     logger.info(f"Credit context features ajoutées → {len(df):,} lignes")
     return df
+
+
+def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    6 features d'interaction inter-variables.
+
+    Les arbres de décision approximent mal les ratios et produits inter-colonnes
+    quand les deux variables sont à des échelles différentes (revenu en MAD vs
+    solde en MAD vs count en unités). Ces features pré-calculent les combinaisons
+    les plus discriminantes pour le modèle.
+
+    IMPORTANT : appeler EN DERNIER, après toutes les autres fonctions d'engineering
+    (utilise solde_moyen, marge_mensuelle, taux_endettement, pct_jours_positifs,
+    score_fragilite, capacite_credit_supp, count_simul, count_simul_mois_n_1).
+    """
+    df = df.copy()
+
+    rev = df['revenu_principal'].clip(lower=1) if 'revenu_principal' in df.columns \
+        else pd.Series(1.0, index=df.index)
+    rev_k = rev / 1000.0 + 1.0   # revenu en kMAD (évite division par zéro)
+
+    # Liquidité normalisée par le revenu (solde moyen en mois de salaire)
+    solde_moyen = df['solde_moyen'] if 'solde_moyen' in df.columns else pd.Series(0.0, index=df.index)
+    df['ratio_epargne_revenu'] = (solde_moyen / rev).clip(-5, 20).astype(np.float32)
+
+    # Marge mensuelle en proportion du revenu (% disponible après charges)
+    marge = df['marge_mensuelle'] if 'marge_mensuelle' in df.columns else pd.Series(0.0, index=df.index)
+    df['marge_relative'] = (marge / rev).clip(-1, 1).astype(np.float32)
+
+    # Buffer de liquidité : combien de mensualités le solde peut couvrir
+    mens = df['total_mensualite_conso_immo'] if 'total_mensualite_conso_immo' in df.columns \
+        else pd.Series(1.0, index=df.index)
+    df['solde_vs_mensualite'] = (solde_moyen / (mens.clip(lower=1))).clip(-10, 50).astype(np.float32)
+
+    # Intensité de simulation pondérée par le revenu
+    simul    = df['count_simul'].clip(lower=0)          if 'count_simul'           in df.columns else pd.Series(0.0, index=df.index)
+    simul_n1 = df['count_simul_mois_n_1'].clip(lower=0) if 'count_simul_mois_n_1' in df.columns else pd.Series(0.0, index=df.index)
+    df['intensite_simul_ponderee'] = (
+        (simul + 3.0 * simul_n1) / rev_k
+    ).clip(0, 50).astype(np.float32)
+
+    # Fragilité normalisée par le revenu (pondère le risque selon les moyens)
+    fragilite = df['score_fragilite'] if 'score_fragilite' in df.columns else pd.Series(0.0, index=df.index)
+    df['fragilite_relative'] = (fragilite / rev_k).clip(0, 100).astype(np.float32)
+
+    # Stabilité de compte × capacité résiduelle d'endettement (double vertu)
+    pct_pos = df['pct_jours_positifs'] if 'pct_jours_positifs' in df.columns else pd.Series(0.5, index=df.index)
+    te = df['taux_endettement'].clip(0, 1) if 'taux_endettement' in df.columns else pd.Series(0.0, index=df.index)
+    df['stabilite_x_capacite'] = (pct_pos * (1.0 - te)).clip(0, 1).astype(np.float32)
+
+    logger.info(f"Interaction features ajoutées → {len(df):,} lignes")
+    return df
