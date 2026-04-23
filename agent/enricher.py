@@ -24,14 +24,13 @@ class ProfileEnricher:
     def __init__(self):
         pass
     
-    def enrich(self, client_row, proba, top_5_shap, lstm_shap_aggregated):
+    def enrich(self, client_row, proba, top_5_shap):
         """
         Args:
-            client_row: pd.Series ou dict avec les 52 features + id_client
-            proba: float — probabilité CatBoost
+            client_row: pd.Series ou dict avec les 55 features + id_client
+            proba: float — probabilité calibrée (ensemble CatBoost + LGBM)
             top_5_shap: list de dicts — top 5 features SHAP du client
-            lstm_shap_aggregated: float — SHAP agrégé des 32 dims LSTM
-        
+
         Returns:
             dict — profil enrichi avec ~55 champs
         """
@@ -115,7 +114,7 @@ class ProfileEnricher:
                 'count_simul': count_simul,
                 'count_simul_recent': count_simul_recent,
                 'intensite_digitale': intensite_digitale,
-                'profil_temporel_lstm': round(float(lstm_shap_aggregated), 4),
+                'score_appetence_synthetique': round(float(get('score_appetence', 0)), 4),
             },
             
             'zone_risque': zone,

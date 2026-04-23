@@ -79,7 +79,7 @@ with st.sidebar:
         <div style='background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);
                     border-radius:8px;padding:10px 14px;margin-bottom:12px'>
             <div style='font-size:0.75rem;font-weight:700;color:#34D399'>✓ MODÈLES CHARGÉS</div>
-            <div style='font-size:0.7rem;color:#94A3B8;margin-top:3px'>LSTM · CatBoost · Agent IA</div>
+            <div style='font-size:0.7rem;color:#94A3B8;margin-top:3px'>CatBoost · LGBM · Agent IA</div>
         </div>""", unsafe_allow_html=True)
     else:
         st.markdown("""
@@ -145,8 +145,8 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     pipeline_steps = [
-        ("1", "LSTM Encoder", "91 jours → embedding 32D"),
-        ("2", "CatBoost", "58 features → score appétence"),
+        ("1", "Features Temporelles", "91 jours → 55 signaux comportementaux"),
+        ("2", "CatBoost + LGBM", "Ensemble → score appétence calibré"),
         ("3", "SHAP", "Explicabilité des décisions"),
         ("4", "Expert Risque", "Règles AWB + note A→E"),
         ("5", "Expert Commercial", "Grille tarifaire"),
@@ -183,7 +183,7 @@ st.markdown("""
 <div class="awb-navbar">
     <div>
         <div class="awb-navbar-title">🏦 Attijariwafa Bank</div>
-        <div class="awb-navbar-sub">Agent d'Analyse Crédit Consommation — Propulsé par LSTM · CatBoost · Mistral 7B</div>
+        <div class="awb-navbar-sub">Agent d'Analyse Crédit Consommation — Propulsé par CatBoost · LGBM · Mistral 7B</div>
     </div>
     <div class="awb-badge">USAGE INTERNE</div>
 </div>
@@ -264,7 +264,7 @@ def _tab_manual():
         </div>
         <div style='font-size:0.85rem;color:#64748B'>
             Renseignez les caractéristiques d'un profil pour simuler l'analyse complète de l'Agent.
-            Le score ML est saisi directement — aucun pipeline LSTM/CatBoost n'est déclenché.
+            Le score ML est saisi directement — aucun pipeline ML n'est déclenché.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -317,7 +317,7 @@ def _tab_manual():
             proba_pct = st.slider(
                 "Score d'appétence ML simulé",
                 0, 100, 72,
-                help="En conditions réelles, ce score est calculé par le modèle LSTM + CatBoost"
+                help="En conditions réelles, ce score est calculé par l'ensemble CatBoost + LGBM"
             )
             proba_ml = proba_pct / 100.0
 
@@ -369,10 +369,10 @@ def _tab_manual():
 
 
 def _run_full_pipeline(client_row):
-    """Exécute LSTM → CatBoost → SHAP → Agent IA avec indicateur de progression."""
+    """Exécute Features → CatBoost/LGBM → SHAP → Agent IA avec indicateur de progression."""
     steps = [
-        (20,  "Pipeline ML : LSTM encoder (91 jours → embedding)..."),
-        (55,  "Pipeline ML : CatBoost scoring + SHAP..."),
+        (20,  "Pipeline ML : feature engineering (91 jours → 55 signaux)..."),
+        (55,  "Pipeline ML : CatBoost/LGBM scoring + SHAP..."),
         (70,  "Agent IA : Analyse risque (règles AWB)..."),
         (82,  "Agent IA : Calcul de l'offre commerciale..."),
         (93,  "Agent IA : Narration Mistral 7B..."),
@@ -391,7 +391,6 @@ def _run_full_pipeline(client_row):
             scoring["client_row"],
             scoring["proba"],
             scoring["top_5_shap"],
-            scoring["lstm_shap_aggregated"],
         )
         progress.progress(100, text=steps[-1][1])
         fiche["_simulation"] = False
@@ -421,7 +420,7 @@ def _run_agent_only(client_row, proba_ml, shap_simul):
         for pct, txt in steps[:-1]:
             progress.progress(pct, text=txt)
 
-        fiche = st.session_state.agent.run(client_row, proba_ml, shap_simul, 0.0)
+        fiche = st.session_state.agent.run(client_row, proba_ml, shap_simul)
         progress.progress(100, text=steps[-1][1])
         fiche["_simulation"] = True
         st.session_state.fiche = fiche

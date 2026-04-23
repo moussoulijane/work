@@ -12,8 +12,7 @@ def get_orchestrator():
     return AgentOrchestrator()
 
 
-def run_agent(client_row, proba: float, top_5_shap: list,
-              lstm_shap_aggregated: float = 0.0) -> dict:
+def run_agent(client_row, proba: float, top_5_shap: list) -> dict:
     """
     Lance le pipeline agent (4 couches) sur un client scoré.
 
@@ -25,6 +24,4 @@ def run_agent(client_row, proba: float, top_5_shap: list,
         client_row=client_row,
         proba=proba,
         top_5_shap=top_5_shap,
-        lstm_shap_aggregated=lstm_shap_aggregated,
-        save=True,
     )

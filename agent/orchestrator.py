@@ -26,7 +26,7 @@ class AgentOrchestrator:
     
     Usage :
         orch = AgentOrchestrator()
-        fiche = orch.run(client_row, proba, top_5_shap, lstm_shap_agg)
+        fiche = orch.run(client_row, proba, top_5_shap)
     """
     
     def __init__(self):
@@ -35,23 +35,20 @@ class AgentOrchestrator:
         self.commercial_expert = CommercialExpert(AGENT_PATHS['pricing_grid'])
         self.narrator = LLMNarrator(LLM_CONFIG)
     
-    def run(self, client_row, proba, top_5_shap, lstm_shap_aggregated):
+    def run(self, client_row, proba, top_5_shap):
         """
         Exécute les 4 couches et retourne la fiche complète.
-        
+
         Args:
-            client_row: pd.Series ou dict avec les 52 features + id_client
-            proba: float — probabilité CatBoost
+            client_row: pd.Series ou dict avec les 55 features + id_client
+            proba: float — probabilité calibrée (ensemble CatBoost + LGBM)
             top_5_shap: list[dict] — top 5 features SHAP
-            lstm_shap_aggregated: float — SHAP agrégé LSTM
-        
+
         Returns:
             dict — fiche complète prête à afficher/sauvegarder
         """
         # Couche 1 : enrichissement
-        profile = self.enricher.enrich(
-            client_row, proba, top_5_shap, lstm_shap_aggregated
-        )
+        profile = self.enricher.enrich(client_row, proba, top_5_shap)
         
         # Couche 2 : expert risque
         risk_decision = self.risk_expert.evaluate(profile)
@@ -68,7 +65,7 @@ class AgentOrchestrator:
                 'id_client': profile['id_client'],
                 'date_generation': datetime.now().isoformat(),
                 'version_agent': '1.0',
-                'version_pipeline': 'lstm_catboost_hybrid_v1',
+                'version_pipeline': 'catboost_lgbm_ensemble_v2',
             },
             'profil': profile,
             'analyse_risque': risk_decision,
